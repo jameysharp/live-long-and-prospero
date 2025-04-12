@@ -6,7 +6,7 @@ use std::ops::BitOr;
 
 pub mod io;
 
-#[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
 pub struct Const(u32);
 
 impl Const {
@@ -70,33 +70,74 @@ impl BinOp {
     }
 }
 
-pub type InstIdx = u16;
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct Var(u8);
 
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum Inst {
-    Const { value: Const },
-    Var { idx: u8 },
-    Load,
-    UnOp { op: UnOp, arg: InstIdx },
-    BinOp { op: BinOp, args: [InstIdx; 2] },
+impl Var {
+    pub const X: Self = Var(0);
+    pub const Y: Self = Var(1);
+    pub const Z: Self = Var(2);
+
+    pub fn name(self) -> char {
+        (b'x' + self.0).into()
+    }
 }
 
-#[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub type InstIdx = u16;
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub enum Inst {
+    Const { value: Const },
+    Var { var: Var },
+    UnOp { op: UnOp, arg: InstIdx },
+    BinOp { op: BinOp, args: [InstIdx; 2] },
+    Load,
+}
+
+impl From<Const> for Inst {
+    fn from(value: Const) -> Self {
+        Inst::Const { value }
+    }
+}
+
+impl From<Var> for Inst {
+    fn from(var: Var) -> Self {
+        Inst::Var { var }
+    }
+}
+
+#[derive(Clone, Copy, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct VarSet(u8);
+
+impl From<Var> for VarSet {
+    fn from(value: Var) -> Self {
+        VarSet(1 << value.0)
+    }
+}
+
+impl Iterator for VarSet {
+    type Item = Var;
+
+    fn next(&mut self) -> Option<Var> {
+        (self.0 != 0).then(|| {
+            let var = Var(self.0.trailing_zeros() as u8);
+            self.0 &= !VarSet::from(var).0;
+            var
+        })
+    }
+}
 
 impl fmt::Debug for VarSet {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let mut v = self.0;
-        if v == 0 {
-            f.write_str("const")
-        } else {
-            while v != 0 {
-                let idx = v.trailing_zeros();
-                write!(f, "{}", char::from(b"xyzabcde"[idx as usize]))?;
-                v &= !(1 << idx);
-            }
-            Ok(())
+        let mut empty = true;
+        for var in *self {
+            write!(f, "{}", var.name())?;
+            empty = false;
         }
+        if empty {
+            write!(f, "const")?;
+        }
+        Ok(())
     }
 }
 
@@ -166,8 +207,8 @@ impl Insts {
 
             Entry::Vacant(e) => {
                 self.vars.push(match *e.key() {
-                    Inst::Const { .. } => VarSet(0),
-                    Inst::Var { idx } => VarSet(1 << idx),
+                    Inst::Const { .. } => VarSet::default(),
+                    Inst::Var { var } => var.into(),
                     Inst::UnOp { arg, .. } => vars(arg),
                     Inst::BinOp { args: [a, b], .. } => vars(a) | vars(b),
                     Inst::Load => panic!("use Insts::load to create load instructions"),

@@ -4,17 +4,17 @@ use std::num::ParseFloatError;
 use std::str::SplitAsciiWhitespace;
 use thiserror::Error;
 
-use super::{BinOp, Const, Inst, InstIdx, Insts, UnOp};
+use super::{BinOp, Const, Inst, InstIdx, Insts, UnOp, Var};
 
 pub fn write(mut f: impl io::Write, insts: impl IntoIterator<Item = Inst>) -> io::Result<()> {
     for (idx, inst) in insts.into_iter().enumerate() {
         write!(f, "v{} ", idx)?;
         match inst {
             Inst::Const { value } => writeln!(f, "const {value}")?,
-            Inst::Var { idx } => writeln!(f, "var-{}", char::from(b"xyzabcde"[usize::from(idx)]))?,
-            Inst::Load => writeln!(f, "load")?,
+            Inst::Var { var } => writeln!(f, "var-{}", var.name())?,
             Inst::UnOp { op, arg } => writeln!(f, "{} v{arg}", op.name())?,
             Inst::BinOp { op, args: [a, b] } => writeln!(f, "{} v{a} v{b}", op.name())?,
+            Inst::Load => writeln!(f, "load")?,
         };
     }
     Ok(())
@@ -57,13 +57,10 @@ pub fn read(f: impl io::BufRead) -> Result<Insts> {
 
         let out = tokens.next()?;
         let inst = match tokens.next()? {
-            "const" => Inst::Const {
-                value: Const::new(tokens.next()?.parse()?),
-            },
-
-            "var-x" => Inst::Var { idx: 0 },
-            "var-y" => Inst::Var { idx: 1 },
-            "var-z" => Inst::Var { idx: 2 },
+            "const" => Const::new(tokens.next()?.parse()?).into(),
+            "var-x" => Var::X.into(),
+            "var-y" => Var::Y.into(),
+            "var-z" => Var::Z.into(),
 
             "neg" => tokens.unop(UnOp::Neg)?,
             "square" => tokens.unop(UnOp::Square)?,
