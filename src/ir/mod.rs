@@ -2,11 +2,11 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::fmt;
 use std::hash::Hash;
-use std::ops::BitOr;
+use std::ops::{BitOr, Deref};
 
 pub mod io;
 
-#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Default, Eq, Hash, PartialEq)]
 pub struct Const(u32);
 
 impl Const {
@@ -94,6 +94,24 @@ pub enum Inst {
     Load,
 }
 
+impl Inst {
+    pub fn args(&self) -> &[InstIdx] {
+        match self {
+            Inst::Const { .. } | Inst::Var { .. } | Inst::Load => &[],
+            Inst::UnOp { arg, .. } => std::slice::from_ref(arg),
+            Inst::BinOp { args, .. } => args,
+        }
+    }
+
+    pub fn args_mut(&mut self) -> &mut [InstIdx] {
+        match self {
+            Inst::Const { .. } | Inst::Var { .. } | Inst::Load => &mut [],
+            Inst::UnOp { arg, .. } => std::slice::from_mut(arg),
+            Inst::BinOp { args, .. } => args,
+        }
+    }
+}
+
 impl From<Const> for Inst {
     fn from(value: Const) -> Self {
         Inst::Const { value }
@@ -108,6 +126,14 @@ impl From<Var> for Inst {
 
 #[derive(Clone, Copy, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct VarSet(u8);
+
+impl VarSet {
+    pub const ALL: VarSet = VarSet(7);
+
+    pub const fn idx(self) -> usize {
+        self.0 as usize
+    }
+}
 
 impl From<Var> for VarSet {
     fn from(value: Var) -> Self {
@@ -231,8 +257,12 @@ impl Insts {
     pub fn vars(&self, idx: InstIdx) -> VarSet {
         self.vars[usize::from(idx)]
     }
+}
 
-    pub fn iter(&self) -> impl Iterator<Item = Inst> {
-        self.pool.iter().cloned()
+impl Deref for Insts {
+    type Target = [Inst];
+
+    fn deref(&self) -> &Self::Target {
+        &self.pool
     }
 }
