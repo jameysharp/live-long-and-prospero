@@ -4,8 +4,7 @@ use std::fmt;
 use std::hash::Hash;
 use std::ops::BitOr;
 
-pub mod reader;
-pub mod writer;
+pub mod io;
 
 #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Const(u32);

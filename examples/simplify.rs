@@ -1,7 +1,7 @@
-use geometry_compiler::ir::{reader, writer};
+use geometry_compiler::ir;
 
-fn main() -> reader::Result<()> {
-    let insts = reader::read(std::io::stdin().lock())?;
-    writer::write(std::io::stdout().lock(), insts.iter())?;
+fn main() -> ir::io::Result<()> {
+    let insts = ir::io::read(std::io::stdin().lock())?;
+    ir::io::write(std::io::stdout().lock(), insts.iter())?;
     Ok(())
 }
