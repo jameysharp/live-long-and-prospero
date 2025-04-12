@@ -4,8 +4,8 @@ use std::fmt;
 use std::hash::Hash;
 use std::ops::BitOr;
 
-mod reader;
-pub use reader::read;
+pub mod reader;
+pub mod writer;
 
 #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Const(u32);
@@ -18,6 +18,12 @@ impl Const {
 
     pub fn value(self) -> f32 {
         f32::from_bits(self.0)
+    }
+}
+
+impl fmt::Display for Const {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.value())
     }
 }
 
@@ -34,6 +40,16 @@ pub enum UnOp {
     Sqrt,
 }
 
+impl UnOp {
+    pub fn name(self) -> &'static str {
+        match self {
+            UnOp::Neg => "neg",
+            UnOp::Square => "square",
+            UnOp::Sqrt => "sqrt",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum BinOp {
     Add,
@@ -41,6 +57,18 @@ pub enum BinOp {
     Mul,
     Min,
     Max,
+}
+
+impl BinOp {
+    pub fn name(self) -> &'static str {
+        match self {
+            BinOp::Add => "add",
+            BinOp::Sub => "sub",
+            BinOp::Mul => "mul",
+            BinOp::Min => "min",
+            BinOp::Max => "max",
+        }
+    }
 }
 
 pub type InstIdx = u16;
@@ -162,5 +190,9 @@ impl Insts {
 
     pub fn vars(&self, idx: InstIdx) -> VarSet {
         self.vars[usize::from(idx)]
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = Inst> {
+        self.pool.iter().cloned()
     }
 }

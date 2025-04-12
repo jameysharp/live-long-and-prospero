@@ -24,7 +24,7 @@ pub enum Error {
     UnknownOp(String),
 }
 
-type Result<T> = std::result::Result<T, Error>;
+pub type Result<T> = std::result::Result<T, Error>;
 
 pub fn read(f: impl io::BufRead) -> Result<Insts> {
     let mut insts = Insts::default();
