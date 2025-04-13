@@ -3,9 +3,10 @@ use std::io;
 use super::{BinOp, Inst, Insts, UnOp};
 
 pub fn interp(mut f: impl io::Write, insts: &Insts, size: u16) -> io::Result<()> {
-    writeln!(f, "P5 {size} {size} 255")?;
+    // https://netpbm.sourceforge.net/doc/pbm.html
+    writeln!(f, "P4 {size} {size}")?;
 
-    let mut row = Vec::with_capacity(usize::from(size));
+    let mut row = vec![0u8; (usize::from(size) + 7) / 8];
     let mut regs = vec![0f32; insts.len()];
     let mut vars = [0f32; 2];
     let scale = 2.0 / f32::from(size - 1);
@@ -42,11 +43,13 @@ pub fn interp(mut f: impl io::Write, insts: &Insts, size: u16) -> io::Result<()>
                 };
             }
 
-            row.push(if *regs.last().unwrap() < 0.0 { 255 } else { 0 });
+            if regs.last().unwrap().is_sign_positive() {
+                row[usize::from(x >> 3)] |= 0x80 >> (x & 7);
+            }
         }
 
         f.write_all(&row)?;
-        row.clear();
+        row.fill(0);
     }
 
     Ok(())
