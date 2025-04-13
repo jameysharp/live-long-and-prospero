@@ -2,7 +2,6 @@ use std::collections::HashMap;
 
 use super::{Const, Inst, InstIdx, Insts, VarSet};
 
-#[derive(Default)]
 pub struct Memoized {
     pub consts: Vec<Const>,
     pub funcs: [MemoizedFunc; VarSet::ALL.idx()],
@@ -16,105 +15,75 @@ pub struct MemoizedFunc {
 }
 
 impl MemoizedFunc {
-    fn push(&mut self, inst: Inst, vars: VarSet, location: InstIdx) -> InstIdx {
+    fn push(&mut self, inst: Inst) -> InstIdx {
         let idx = InstIdx::try_from(self.insts.len()).unwrap();
         self.insts.push(inst);
-        if location != InstIdx::MAX {
-            self.location.push((idx, vars, location));
-        }
+        idx
+    }
+
+    fn add_output(&mut self, vars: VarSet, def: InstIdx) -> InstIdx {
+        let idx = self.outputs;
+        self.outputs = idx.checked_add(1).unwrap();
+        self.location.push((def, vars, idx));
         idx
     }
 }
 
 pub fn memoize(insts: &Insts) -> Memoized {
-    let mut counters = Counters::default();
-    counters.location.resize(insts.len(), InstIdx::MAX);
+    let mut funcs: [MemoizedFunc; VarSet::ALL.idx() + 1] = Default::default();
+    let mut location: Vec<InstIdx> = vec![InstIdx::MAX; insts.len()];
+    let mut remap: HashMap<(VarSet, InstIdx), InstIdx> = HashMap::new();
 
     for (idx, inst) in insts.iter().enumerate() {
         let idx = InstIdx::try_from(idx).unwrap();
         let vars = insts.vars(idx);
 
-        // need space for this instruction
-        counters.inst(vars);
+        let mut inst = inst.clone();
+        for arg in inst.args_mut() {
+            let arg_vars = insts.vars(*arg);
+            let arg_def = remap[&(arg_vars, *arg)];
+            *arg = *remap.entry((vars, *arg)).or_insert_with(|| {
+                // if we haven't already remapped this argument, then it's
+                // from a different varset and we need to load it now
+                assert_ne!(vars, arg_vars);
 
-        // find any args which should be memoized
-        for &arg in inst.args() {
-            let arg_vars = insts.vars(arg);
-            if arg_vars != vars {
-                // might need a load instruction
-                counters.inst(vars);
-                counters.memoize(arg, arg_vars);
-            }
+                let location = &mut location[usize::from(*arg)];
+                if *location == InstIdx::MAX {
+                    // we haven't yet added this arg to the outputs of the
+                    // function that computes it, so do that first
+                    *location = funcs[arg_vars.idx()].add_output(arg_vars, arg_def);
+                }
+
+                let new_idx = funcs[vars.idx()].push(Inst::Load);
+                funcs[vars.idx()]
+                    .location
+                    .push((new_idx, arg_vars, *location));
+                new_idx
+            });
         }
+
+        let new_idx = funcs[vars.idx()].push(inst);
+        remap.insert((vars, idx), new_idx);
     }
 
     // mark the last result as needing to be written too
     let last = InstIdx::try_from(insts.len().checked_sub(1).unwrap()).unwrap();
-    counters.memoize(last, insts.vars(last));
+    let last_vars = insts.vars(last);
+    funcs[last_vars.idx()].add_output(last_vars, remap[&(last_vars, last)]);
 
-    let mut out = Memoized::default();
-    out.consts
-        .resize(usize::from(counters.storage[0]), Const::default());
-    for ((func, &capacity), &storage) in out
-        .funcs
-        .iter_mut()
-        .zip(&counters.insts[1..])
-        .zip(&counters.storage[1..])
-    {
-        func.insts.reserve(capacity.into());
-        func.location.reserve(storage.into());
-        func.outputs = storage;
-    }
-
-    let mut remap = HashMap::new();
-    for (idx, inst) in insts.iter().enumerate() {
-        let idx = InstIdx::try_from(idx).unwrap();
-        let vars = insts.vars(idx);
-
-        if let Some(func) = vars.idx().checked_sub(1) {
-            let mut inst = inst.clone();
-            for arg in inst.args_mut() {
-                *arg = *remap.entry((func, *arg)).or_insert_with(|| {
-                    // if we haven't already remapped this argument, then it's
-                    // from a different varset and we need to load it now
-                    let arg_vars = insts.vars(*arg);
-                    assert_ne!(vars, arg_vars);
-                    out.funcs[func].push(Inst::Load, arg_vars, counters.location[usize::from(*arg)])
-                });
-            }
-
-            let new_idx = out.funcs[func].push(inst, vars, counters.location[usize::from(idx)]);
-            remap.insert((func, idx), new_idx);
-        } else {
-            let Inst::Const { value } = inst else {
+    let [consts, funcs @ ..] = funcs;
+    let consts = consts
+        .location
+        .into_iter()
+        .enumerate()
+        .map(|(expected_loc, (idx, _, loc))| {
+            let Inst::Const { value } = consts.insts[usize::from(idx)] else {
                 todo!("constant folding")
             };
-            out.consts[usize::from(counters.location[usize::from(idx)])] = *value;
-        }
-    }
+            debug_assert_eq!(loc, expected_loc as InstIdx);
+            value
+        })
+        .collect();
 
-    out
-}
-
-#[derive(Default)]
-struct Counters {
-    insts: [InstIdx; VarSet::ALL.idx() + 1],
-    storage: [InstIdx; VarSet::ALL.idx() + 1],
-    location: Vec<InstIdx>,
-}
-
-impl Counters {
-    fn inst(&mut self, vars: VarSet) {
-        self.insts[vars.idx()] += 1;
-    }
-
-    fn memoize(&mut self, idx: InstIdx, vars: VarSet) {
-        // ensure storage has been allocated for memoizing this arg
-        let location = &mut self.location[usize::from(idx)];
-        if *location == InstIdx::MAX {
-            let storage = &mut self.storage[vars.idx()];
-            *location = *storage;
-            *storage += 1;
-        }
-    }
+    Memoized { consts, funcs }
 }
