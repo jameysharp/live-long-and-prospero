@@ -6,6 +6,7 @@ use std::ops::{BitOr, Deref};
 
 pub mod io;
 pub mod memoize;
+pub mod reorder;
 
 #[derive(Clone, Copy, Default, Eq, Hash, PartialEq)]
 pub struct Const(u32);
