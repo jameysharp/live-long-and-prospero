@@ -4,6 +4,7 @@ use std::fmt;
 use std::hash::Hash;
 use std::ops::{BitOr, Deref};
 
+pub mod interp;
 pub mod io;
 pub mod memoize;
 pub mod reorder;
