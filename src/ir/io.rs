@@ -71,7 +71,8 @@ pub fn read(f: impl io::BufRead) -> Result<Insts> {
 
     for line in f.lines() {
         let line = line?;
-        if line.starts_with('#') {
+        let line = line.trim_ascii();
+        if line.is_empty() || line.starts_with('#') {
             continue;
         }
 
