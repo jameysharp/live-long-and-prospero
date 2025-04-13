@@ -9,6 +9,7 @@ pub struct Memoized {
 
 #[derive(Default)]
 pub struct MemoizedFunc {
+    pub vars: VarSet,
     pub insts: Vec<Inst>,
     pub location: Vec<(InstIdx, VarSet, InstIdx)>,
     pub outputs: InstIdx,
@@ -21,16 +22,20 @@ impl MemoizedFunc {
         idx
     }
 
-    fn add_output(&mut self, vars: VarSet, def: InstIdx) -> InstIdx {
+    fn add_output(&mut self, def: InstIdx) -> InstIdx {
         let idx = self.outputs;
         self.outputs = idx.checked_add(1).unwrap();
-        self.location.push((def, vars, idx));
+        self.location.push((def, self.vars, idx));
         idx
     }
 }
 
 pub fn memoize(insts: &Insts) -> Memoized {
     let mut funcs: [MemoizedFunc; VarSet::ALL.idx() + 1] = Default::default();
+    for (idx, func) in funcs.iter_mut().enumerate() {
+        func.vars = VarSet(idx as u8);
+    }
+
     let mut location: Vec<InstIdx> = vec![InstIdx::MAX; insts.len()];
     let mut remap: HashMap<(VarSet, InstIdx), InstIdx> = HashMap::new();
 
@@ -51,7 +56,7 @@ pub fn memoize(insts: &Insts) -> Memoized {
                 if *location == InstIdx::MAX {
                     // we haven't yet added this arg to the outputs of the
                     // function that computes it, so do that first
-                    *location = funcs[arg_vars.idx()].add_output(arg_vars, arg_def);
+                    *location = funcs[arg_vars.idx()].add_output(arg_def);
                 }
 
                 let new_idx = funcs[vars.idx()].push(Inst::Load);
@@ -67,9 +72,12 @@ pub fn memoize(insts: &Insts) -> Memoized {
     }
 
     // mark the last result as needing to be written too
-    let last = InstIdx::try_from(insts.len().checked_sub(1).unwrap()).unwrap();
-    let last_vars = insts.vars(last);
-    funcs[last_vars.idx()].add_output(last_vars, remap[&(last_vars, last)]);
+    for func in funcs.iter_mut().rev() {
+        if let Some(last) = func.insts.len().checked_sub(1) {
+            func.add_output(InstIdx::try_from(last).unwrap());
+            break;
+        }
+    }
 
     let [consts, funcs @ ..] = funcs;
     let consts = consts

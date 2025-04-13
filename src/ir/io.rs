@@ -5,7 +5,7 @@ use std::str::SplitAsciiWhitespace;
 use thiserror::Error;
 
 use super::memoize::Memoized;
-use super::{BinOp, Const, Inst, InstIdx, Insts, UnOp, Var, VarSet};
+use super::{BinOp, Const, Inst, InstIdx, Insts, UnOp, Var};
 
 pub fn write(mut f: impl io::Write, insts: impl IntoIterator<Item = Inst>) -> io::Result<()> {
     for (idx, inst) in insts.into_iter().enumerate() {
@@ -27,11 +27,10 @@ pub fn write_memoized(mut f: impl io::Write, memoized: &Memoized) -> io::Result<
         writeln!(f, "v{idx} const {value}")?;
     }
 
-    for (idx, func) in memoized.funcs.iter().enumerate() {
+    for func in memoized.funcs.iter() {
         if !func.insts.is_empty() {
-            let vars = VarSet((idx + 1) as u8);
             writeln!(f)?;
-            writeln!(f, "# func {vars:?}: {} outputs", func.outputs)?;
+            writeln!(f, "# func {:?}: {} outputs", func.vars, func.outputs)?;
             for &(reg, vars, loc) in &func.location {
                 let mode = if let Inst::Load = func.insts[usize::from(reg)] {
                     "load"
