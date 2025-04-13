@@ -5,6 +5,7 @@ use std::hash::Hash;
 use std::ops::{BitOr, Deref};
 
 pub mod io;
+pub mod memoize;
 
 #[derive(Clone, Copy, Default, Eq, Hash, PartialEq)]
 pub struct Const(u32);
