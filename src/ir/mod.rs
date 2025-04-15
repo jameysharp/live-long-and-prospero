@@ -7,6 +7,7 @@ use std::ops::{BitOr, Deref};
 pub mod interp;
 pub mod io;
 pub mod memoize;
+pub mod reassociate;
 pub mod reorder;
 
 #[derive(Clone, Copy, Default, Eq, Hash, PartialEq)]
@@ -71,6 +72,16 @@ impl BinOp {
             BinOp::Max => "max",
         }
     }
+
+    pub fn is_commutative(self) -> bool {
+        match self {
+            BinOp::Add => true,
+            BinOp::Sub => false,
+            BinOp::Mul => true,
+            BinOp::Min => true,
+            BinOp::Max => true,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -112,6 +123,24 @@ impl Inst {
             Inst::UnOp { arg, .. } => std::slice::from_mut(arg),
             Inst::BinOp { args, .. } => args,
         }
+    }
+
+    pub fn is_unop(&self, expected: UnOp) -> Option<InstIdx> {
+        if let &Inst::UnOp { op, arg } = self {
+            if op == expected {
+                return Some(arg);
+            }
+        }
+        None
+    }
+
+    pub fn is_binop_mut(&mut self, expected: BinOp) -> Option<&mut [InstIdx; 2]> {
+        if let Inst::BinOp { op, args } = self {
+            if *op == expected {
+                return Some(args);
+            }
+        }
+        None
     }
 }
 
