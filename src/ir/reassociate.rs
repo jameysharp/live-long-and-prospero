@@ -136,8 +136,8 @@ impl State<'_> {
     }
 
     fn rebalance_add_or_sub(&mut self, [inst, inst1, inst2]: &mut [&mut Inst; 3]) -> Option<()> {
-        fn add_or_sub(inst: &mut Inst) -> Option<(bool, &mut [InstIdx; 2])> {
-            match inst {
+        fn add_or_sub(inst: &Inst) -> Option<(bool, [InstIdx; 2])> {
+            match *inst {
                 Inst::BinOp { op, args } => match op {
                     BinOp::Add => Some((true, args)),
                     BinOp::Sub => Some((false, args)),
@@ -148,7 +148,7 @@ impl State<'_> {
         }
 
         let (sign1, [w, x]) = add_or_sub(inst1)?;
-        let (sign2, [y, z]) = add_or_sub(inst2)?;
+        let (sign2, [mut y, mut z]) = add_or_sub(inst2)?;
 
         // if both subterms are addition, use the general case
         if sign1 && sign2 {
@@ -159,10 +159,10 @@ impl State<'_> {
 
         // if either subterm is a subtraction and has other uses, we can't rewrite
         // this subtree
-        if !sign1 && !self.can_reuse(*a) {
+        if !sign1 && !self.can_reuse(a) {
             return None;
         }
-        if !sign2 && !self.can_reuse(*b) {
+        if !sign2 && !self.can_reuse(b) {
             return None;
         }
 
@@ -170,22 +170,22 @@ impl State<'_> {
             debug_assert!(!sign1);
             if sign {
                 // (w - x) + (y + z) = (w + (y + z)) - x
-                ([*a, *x], Some([*w, *b]), None)
+                ([a, x], Some([w, b]), None)
             } else {
                 // (w - x) - (y + z) = w - (x + (y + z))
-                ([*w, *a], Some([*x, *b]), None)
+                ([w, a], Some([x, b]), None)
             }
         } else {
             if !sign {
                 // a - (y - z) = a + (z - y)
-                swap(y, z);
+                swap(&mut y, &mut z);
             }
             if sign1 {
                 // (w + x) + (y - z) = ((w + x) + y) - z
-                ([*b, *z], None, Some([*a, *y]))
+                ([b, z], None, Some([a, y]))
             } else {
                 // (w - x) + (y - z) = (w + y) - (x + z)
-                ([*a, *b], Some([*w, *y]), Some([*x, *z]))
+                ([a, b], Some([w, y]), Some([x, z]))
             }
         };
 
@@ -193,12 +193,12 @@ impl State<'_> {
         let op = BinOp::Add;
         debug_assert_eq!(args1.is_none(), sign1);
         if let Some(mut args) = args1 {
-            self.visit_binop(*a, op, &mut args);
+            self.visit_binop(a, op, &mut args);
             **inst1 = Inst::BinOp { op, args };
         }
         debug_assert_eq!(args2.is_none(), sign2);
         if let Some(mut args) = args2 {
-            self.visit_binop(*b, op, &mut args);
+            self.visit_binop(b, op, &mut args);
             **inst2 = Inst::BinOp { op, args };
         }
 
