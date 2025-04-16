@@ -8,7 +8,7 @@ pub fn reassociate(insts: &mut Insts) {
     // for every commutative binary operator (op a b) we'll establish this invariant:
     //   vars(a) <= vars(b)
     // further, vars(a) == vars(b) implies one of these:
-    //   a does not use the same operator
+    //   b does not use the same operator
     //   a or b has multiple uses
     let mut state = State {
         vars: &mut insts.vars,
@@ -220,8 +220,8 @@ impl State<'_> {
         }
 
         let [a, b] = args;
-        if let Some(args1) = inst1.is_binop_mut(*op) {
-            if let Some(args2) = inst2.is_binop_mut(*op) {
+        if let Some(args2) = inst2.is_binop_mut(*op) {
+            if let Some(args1) = inst1.is_binop_mut(*op) {
                 // don't modify inst1 or inst2 if they have other
                 // uses besides in inst, and at this point we can't
                 // reassociate without modifying both
@@ -229,7 +229,7 @@ impl State<'_> {
                     self.rebalance(*op, args, args1, args2);
                 }
             } else {
-                // inst1 matched but inst2 did not, and they have the
+                // inst2 matched but inst1 did not, and they have the
                 // same vars, so swap them to establish the invariant
                 swap(a, b);
             }
@@ -251,7 +251,7 @@ impl State<'_> {
         let [inst1, inst2] = *args;
         let [a1, b1] = *args1;
         let [a2, b2] = *args2;
-        let leaves = [b1, b2, a1, a2].map(|idx| (self.vars(idx), idx));
+        let leaves = [a1, a2, b1, b2].map(|idx| (self.vars(idx), idx));
 
         let mut insts = [(InstIdx::MAX, args), (inst1, args1), (inst2, args2)]
             .into_iter()
@@ -261,7 +261,7 @@ impl State<'_> {
                 *old = new;
             } else {
                 let (inst, args) = insts.next().unwrap();
-                let new_args = [new, *old];
+                let new_args = [*old, new];
                 *old = inst;
                 if new_args != *args {
                     *args = new_args;
