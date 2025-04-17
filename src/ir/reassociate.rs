@@ -1,4 +1,3 @@
-use std::cmp::Ordering;
 use std::mem::swap;
 use std::num::Saturating;
 
@@ -6,8 +5,7 @@ use super::{BinOp, Inst, InstIdx, Insts, UnOp, VarSet};
 
 pub fn reassociate(insts: &mut Insts) {
     // for every commutative binary operator (op a b) we'll establish this invariant:
-    //   vars(a) <= vars(b)
-    // further, vars(a) == vars(b) implies one of these:
+    // vars(a) == vars(b) implies one of these:
     //   b does not use the same operator
     //   a or b has multiple uses
     let mut state = State {
@@ -28,11 +26,13 @@ pub fn reassociate(insts: &mut Insts) {
     }
 
     for idx in 0..InstIdx::try_from(insts.pool.len()).unwrap() {
-        if let Inst::BinOp { op, args } = &mut insts.pool[usize::from(idx)] {
-            state.visit_binop(idx, *op, args);
+        if let Inst::BinOp { op, args } = insts.pool[usize::from(idx)] {
+            state.visit_binop(idx, op, args);
             while let Some((op, indexes)) = state.stack.pop() {
                 fn subtree(indexes: [InstIdx; 3], insts: &mut [Inst]) -> [&mut Inst; 3] {
-                    insts.get_disjoint_mut(indexes.map(usize::from)).unwrap()
+                    let subtree = insts.get_disjoint_mut(indexes.map(usize::from)).unwrap();
+                    debug_assert_eq!(subtree[0].args(), &indexes[1..]);
+                    subtree
                 }
 
                 let [ir, ia, ib] = subtree(indexes, &mut insts.pool);
@@ -40,8 +40,15 @@ pub fn reassociate(insts: &mut Insts) {
                 let new_root = state.extract_neg(indexes, op, ia, ib);
                 let mut subtree = if let Some((new_root, r, [a, b])) = new_root {
                     *ir = new_root;
-                    debug_assert_ne!(indexes, [r, a, b]);
-                    subtree([r, a, b], &mut insts.pool)
+                    debug_assert_eq!(state.vars(a), state.vars(b));
+                    let new_indexes = [r, a, b];
+                    debug_assert_ne!(indexes, new_indexes);
+                    for old in &indexes[1..] {
+                        if !new_indexes.contains(old) {
+                            state.uses[usize::from(*old)] -= 1;
+                        }
+                    }
+                    subtree(new_indexes, &mut insts.pool)
                 } else {
                     [ir, ia, ib]
                 };
@@ -68,16 +75,12 @@ impl State<'_> {
         self.uses[usize::from(root)].0 < 2
     }
 
-    fn visit_binop(&mut self, root: InstIdx, op: BinOp, [a, b]: &mut [InstIdx; 2]) {
+    fn visit_binop(&mut self, root: InstIdx, op: BinOp, [a, b]: [InstIdx; 2]) {
         // if both args are the same, their vars are equal, and we'd blow up
         // in get_disjoint_mut. can't reassociate that case without duplicating
         // instructions anyway.
-        if a != b {
-            match self.vars(*a).cmp(self.vars(*b)) {
-                Ordering::Greater if op.is_commutative() => swap(a, b),
-                Ordering::Equal => self.stack.push((op, [root, *a, *b])),
-                _ => {}
-            }
+        if a != b && self.vars(a) == self.vars(b) {
+            self.stack.push((op, [root, a, b]));
         }
     }
 
@@ -192,13 +195,13 @@ impl State<'_> {
         // now rewrite subterms, adding them to the stack to revisit if changed
         let op = BinOp::Add;
         debug_assert_eq!(args1.is_none(), sign1);
-        if let Some(mut args) = args1 {
-            self.visit_binop(a, op, &mut args);
+        if let Some(args) = args1 {
+            self.visit_binop(a, op, args);
             **inst1 = Inst::BinOp { op, args };
         }
         debug_assert_eq!(args2.is_none(), sign2);
-        if let Some(mut args) = args2 {
-            self.visit_binop(b, op, &mut args);
+        if let Some(args) = args2 {
+            self.visit_binop(b, op, args);
             **inst2 = Inst::BinOp { op, args };
         }
 
@@ -268,7 +271,7 @@ impl State<'_> {
                     if inst != InstIdx::MAX {
                         let [a, b] = new_args;
                         self.vars[usize::from(inst)] = self.vars(a) | self.vars(b);
-                        self.visit_binop(inst, op, args);
+                        self.visit_binop(inst, op, new_args);
                     }
                 }
             }
