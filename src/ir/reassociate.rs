@@ -257,39 +257,39 @@ impl State<'_> {
         let [a2, b2] = *args2;
         let leaves = [a1, a2, b1, b2].map(|idx| (self.vars(idx), idx));
 
-        let mut insts = [(InstIdx::INVALID, args), (inst1, args1), (inst2, args2)]
+        let mut insts = [(None, args), (Some(inst1), args1), (Some(inst2), args2)]
             .into_iter()
             .rev();
-        let mut merge = |old: &mut InstIdx, new| {
-            if *old == InstIdx::INVALID {
-                *old = new;
-            } else {
+        let mut merge = |group: &mut Option<InstIdx>, new| {
+            if let Some(old) = *group {
                 let (inst, args) = insts.next().unwrap();
-                let new_args = [*old, new];
-                *old = inst;
+                let new_args = [old, new];
+                *group = inst;
                 if new_args != *args {
                     *args = new_args;
-                    if inst != InstIdx::INVALID {
+                    if let Some(inst) = inst {
                         let [a, b] = new_args;
                         self.vars[inst.idx()] = self.vars(a) | self.vars(b);
                         self.visit_binop(inst, op, new_args);
                     }
                 }
+            } else {
+                *group = Some(new);
             }
         };
 
-        let mut groups = [InstIdx::INVALID; VarSet::ALL.idx() + 1];
+        let mut groups = [None; VarSet::ALL.idx() + 1];
         for (vars, idx) in leaves {
             merge(&mut groups[vars.idx()], idx);
         }
 
-        let mut last = InstIdx::INVALID;
+        let mut last = None;
         for group in groups.into_iter().rev() {
-            if group != InstIdx::INVALID {
+            if let Some(group) = group {
                 merge(&mut last, group);
             }
         }
-        debug_assert_eq!(last, InstIdx::INVALID);
+        debug_assert_eq!(last, None);
         debug_assert_eq!(insts.next(), None);
     }
 }

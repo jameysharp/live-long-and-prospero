@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::fmt;
 use std::hash::Hash;
+use std::num::{NonZeroU16, TryFromIntError};
 use std::ops::{BitOr, Deref};
 
 pub mod interp;
@@ -98,32 +99,27 @@ impl Var {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct InstIdx(u16);
+pub struct InstIdx(NonZeroU16);
 
 impl InstIdx {
-    pub const INVALID: Self = InstIdx(u16::MAX);
-
     pub const fn idx(self) -> usize {
-        assert!(!matches!(self.0, u16::MAX));
-        self.0 as usize
+        self.0.get() as usize - 1
     }
 }
 
 impl TryFrom<usize> for InstIdx {
-    type Error = &'static str;
+    type Error = TryFromIntError;
 
     fn try_from(value: usize) -> Result<Self, Self::Error> {
-        if value < usize::from(u16::MAX) {
-            Ok(InstIdx(value as u16))
-        } else {
-            Err("instruction index should fit in u16")
-        }
+        u16::try_from(value.wrapping_add(1))
+            .and_then(NonZeroU16::try_from)
+            .map(InstIdx)
     }
 }
 
 impl fmt::Display for InstIdx {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self.0)
+        write!(f, "{}", self.idx())
     }
 }
 
