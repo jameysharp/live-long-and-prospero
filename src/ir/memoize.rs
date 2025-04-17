@@ -7,12 +7,14 @@ pub struct Memoized {
     pub funcs: [MemoizedFunc; VarSet::ALL.idx()],
 }
 
+pub type Location = u16;
+
 #[derive(Default)]
 pub struct MemoizedFunc {
     pub vars: VarSet,
     pub insts: Vec<Inst>,
-    pub location: Vec<(InstIdx, VarSet, InstIdx)>,
-    pub outputs: InstIdx,
+    pub location: Vec<(InstIdx, VarSet, Location)>,
+    pub outputs: Location,
 }
 
 impl MemoizedFunc {
@@ -22,7 +24,7 @@ impl MemoizedFunc {
         idx
     }
 
-    fn add_output(&mut self, def: InstIdx) -> InstIdx {
+    fn add_output(&mut self, def: InstIdx) -> Location {
         let idx = self.outputs;
         self.outputs = idx.checked_add(1).unwrap();
         self.location.push((def, self.vars, idx));
@@ -36,7 +38,7 @@ pub fn memoize(insts: &Insts) -> Memoized {
         func.vars = VarSet(idx as u8);
     }
 
-    let mut location: Vec<InstIdx> = vec![InstIdx::MAX; insts.len()];
+    let mut location: Vec<Location> = vec![Location::MAX; insts.len()];
     let mut remap: HashMap<(VarSet, InstIdx), InstIdx> = HashMap::new();
 
     for (idx, inst) in insts.iter().enumerate() {
@@ -52,8 +54,8 @@ pub fn memoize(insts: &Insts) -> Memoized {
                 // from a different varset and we need to load it now
                 assert_ne!(vars, arg_vars);
 
-                let location = &mut location[usize::from(*arg)];
-                if *location == InstIdx::MAX {
+                let location = &mut location[arg.idx()];
+                if *location == Location::MAX {
                     // we haven't yet added this arg to the outputs of the
                     // function that computes it, so do that first
                     *location = funcs[arg_vars.idx()].add_output(arg_def);
@@ -85,10 +87,10 @@ pub fn memoize(insts: &Insts) -> Memoized {
         .into_iter()
         .enumerate()
         .map(|(expected_loc, (idx, _, loc))| {
-            let Inst::Const { value } = consts.insts[usize::from(idx)] else {
+            let Inst::Const { value } = consts.insts[idx.idx()] else {
                 todo!("constant folding")
             };
-            debug_assert_eq!(loc, expected_loc as InstIdx);
+            debug_assert_eq!(loc, expected_loc as Location);
             value
         })
         .collect();

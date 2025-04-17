@@ -21,7 +21,7 @@ pub fn interp(mut f: impl io::Write, insts: &Insts, size: u16) -> io::Result<()>
                     Inst::Const { value } => value.value(),
                     Inst::Var { var } => vars[usize::from(var.0)],
                     Inst::UnOp { op, arg } => {
-                        let arg = regs[usize::from(arg)];
+                        let arg = regs[arg.idx()];
                         match op {
                             UnOp::Neg => -arg,
                             UnOp::Square => arg * arg,
@@ -29,8 +29,8 @@ pub fn interp(mut f: impl io::Write, insts: &Insts, size: u16) -> io::Result<()>
                         }
                     }
                     Inst::BinOp { op, args: [a, b] } => {
-                        let a = regs[usize::from(a)];
-                        let b = regs[usize::from(b)];
+                        let a = regs[a.idx()];
+                        let b = regs[b.idx()];
                         match op {
                             BinOp::Add => a + b,
                             BinOp::Sub => a - b,

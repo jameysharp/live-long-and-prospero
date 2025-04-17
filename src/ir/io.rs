@@ -32,7 +32,7 @@ pub fn write_memoized(mut f: impl io::Write, memoized: &Memoized) -> io::Result<
             writeln!(f)?;
             writeln!(f, "# func {:?}: {} outputs", func.vars, func.outputs)?;
             for &(reg, vars, loc) in &func.location {
-                let mode = if let Inst::Load = func.insts[usize::from(reg)] {
+                let mode = if let Inst::Load = func.insts[reg.idx()] {
                     "load"
                 } else {
                     "store"

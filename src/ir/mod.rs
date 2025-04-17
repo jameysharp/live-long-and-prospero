@@ -97,7 +97,35 @@ impl Var {
     }
 }
 
-pub type InstIdx = u16;
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct InstIdx(u16);
+
+impl InstIdx {
+    pub const INVALID: Self = InstIdx(u16::MAX);
+
+    pub const fn idx(self) -> usize {
+        assert!(!matches!(self.0, u16::MAX));
+        self.0 as usize
+    }
+}
+
+impl TryFrom<usize> for InstIdx {
+    type Error = &'static str;
+
+    fn try_from(value: usize) -> Result<Self, Self::Error> {
+        if value < usize::from(u16::MAX) {
+            Ok(InstIdx(value as u16))
+        } else {
+            Err("instruction index should fit in u16")
+        }
+    }
+}
+
+impl fmt::Display for InstIdx {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum Inst {
@@ -225,7 +253,7 @@ impl Insts {
                 if let Inst::UnOp {
                     op: UnOp::Neg,
                     arg: pos,
-                } = self.pool[usize::from(*arg)]
+                } = self.pool[arg.idx()]
                 {
                     *arg = pos;
                 }
@@ -257,7 +285,7 @@ impl Insts {
             _ => (),
         }
 
-        let vars = |idx: InstIdx| self.vars[usize::from(idx)];
+        let vars = |idx: InstIdx| self.vars[idx.idx()];
 
         match self.gvn.entry(inst) {
             // If we've already added the same instruction, reuse it.
@@ -280,14 +308,14 @@ impl Insts {
     }
 
     pub fn load(&mut self, vars: VarSet) -> InstIdx {
-        let idx = self.pool.len();
+        let idx = self.pool.len().try_into().unwrap();
         self.pool.push(Inst::Load);
         self.vars.push(vars);
-        idx.try_into().unwrap()
+        idx
     }
 
     pub fn vars(&self, idx: InstIdx) -> VarSet {
-        self.vars[usize::from(idx)]
+        self.vars[idx.idx()]
     }
 }
 

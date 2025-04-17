@@ -20,17 +20,18 @@ pub fn reassociate(insts: &mut Insts) {
     for (idx, inst) in insts.pool.iter().enumerate().rev() {
         if state.uses[idx].0 > 0 {
             for &arg in inst.args() {
-                state.uses[usize::from(arg)] += 1;
+                state.uses[arg.idx()] += 1;
             }
         }
     }
 
-    for idx in 0..InstIdx::try_from(insts.pool.len()).unwrap() {
-        if let Inst::BinOp { op, args } = insts.pool[usize::from(idx)] {
+    for idx in 0..insts.pool.len() {
+        let idx = InstIdx::try_from(idx).unwrap();
+        if let Inst::BinOp { op, args } = insts.pool[idx.idx()] {
             state.visit_binop(idx, op, args);
             while let Some((op, indexes)) = state.stack.pop() {
                 fn subtree(indexes: [InstIdx; 3], insts: &mut [Inst]) -> [&mut Inst; 3] {
-                    let subtree = insts.get_disjoint_mut(indexes.map(usize::from)).unwrap();
+                    let subtree = insts.get_disjoint_mut(indexes.map(InstIdx::idx)).unwrap();
                     debug_assert_eq!(subtree[0].args(), &indexes[1..]);
                     subtree
                 }
@@ -45,7 +46,7 @@ pub fn reassociate(insts: &mut Insts) {
                     debug_assert_ne!(indexes, new_indexes);
                     for old in &indexes[1..] {
                         if !new_indexes.contains(old) {
-                            state.uses[usize::from(*old)] -= 1;
+                            state.uses[old.idx()] -= 1;
                         }
                     }
                     subtree(new_indexes, &mut insts.pool)
@@ -68,11 +69,11 @@ struct State<'a> {
 
 impl State<'_> {
     fn vars(&self, root: InstIdx) -> VarSet {
-        self.vars[usize::from(root)]
+        self.vars[root.idx()]
     }
 
     fn can_reuse(&self, root: InstIdx) -> bool {
-        self.uses[usize::from(root)].0 < 2
+        self.uses[root.idx()].0 < 2
     }
 
     fn visit_binop(&mut self, root: InstIdx, op: BinOp, [a, b]: [InstIdx; 2]) {
@@ -96,7 +97,7 @@ impl State<'_> {
         let mut negate = |op, arg, iarg: &mut Inst, args| {
             self.can_reuse(arg).then(|| {
                 *iarg = Inst::BinOp { op, args };
-                self.vars[usize::from(arg)] = self.vars(r);
+                self.vars[arg.idx()] = self.vars(r);
                 (Inst::UnOp { op: UnOp::Neg, arg }, arg, args)
             })
         };
@@ -256,11 +257,11 @@ impl State<'_> {
         let [a2, b2] = *args2;
         let leaves = [a1, a2, b1, b2].map(|idx| (self.vars(idx), idx));
 
-        let mut insts = [(InstIdx::MAX, args), (inst1, args1), (inst2, args2)]
+        let mut insts = [(InstIdx::INVALID, args), (inst1, args1), (inst2, args2)]
             .into_iter()
             .rev();
         let mut merge = |old: &mut InstIdx, new| {
-            if *old == InstIdx::MAX {
+            if *old == InstIdx::INVALID {
                 *old = new;
             } else {
                 let (inst, args) = insts.next().unwrap();
@@ -268,27 +269,27 @@ impl State<'_> {
                 *old = inst;
                 if new_args != *args {
                     *args = new_args;
-                    if inst != InstIdx::MAX {
+                    if inst != InstIdx::INVALID {
                         let [a, b] = new_args;
-                        self.vars[usize::from(inst)] = self.vars(a) | self.vars(b);
+                        self.vars[inst.idx()] = self.vars(a) | self.vars(b);
                         self.visit_binop(inst, op, new_args);
                     }
                 }
             }
         };
 
-        let mut groups = [InstIdx::MAX; VarSet::ALL.idx() + 1];
+        let mut groups = [InstIdx::INVALID; VarSet::ALL.idx() + 1];
         for (vars, idx) in leaves {
             merge(&mut groups[vars.idx()], idx);
         }
 
-        let mut last = InstIdx::MAX;
+        let mut last = InstIdx::INVALID;
         for group in groups.into_iter().rev() {
-            if group != InstIdx::MAX {
+            if group != InstIdx::INVALID {
                 merge(&mut last, group);
             }
         }
-        debug_assert_eq!(last, InstIdx::MAX);
+        debug_assert_eq!(last, InstIdx::INVALID);
         debug_assert_eq!(insts.next(), None);
     }
 }
