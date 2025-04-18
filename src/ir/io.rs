@@ -1,7 +1,6 @@
 use std::collections::{HashMap, hash_map::Entry};
 use std::io;
 use std::num::ParseFloatError;
-use std::str::SplitAsciiWhitespace;
 use thiserror::Error;
 
 use super::memoize::Memoized;
@@ -71,17 +70,16 @@ pub fn read(f: impl io::BufRead) -> Result<Insts> {
 
     for line in f.lines() {
         let line = line?;
-        let line = line.trim_ascii();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
 
         let mut tokens = Tokens {
             names: &names,
-            tokens: line.split_ascii_whitespace(),
+            tokens: line
+                .split_ascii_whitespace()
+                .take_while(|token| !token.starts_with('#')),
         };
 
-        let out = tokens.next()?;
+        let Ok(out) = tokens.next() else { continue };
+
         let inst = match tokens.next()? {
             "const" => Const::new(tokens.next()?.parse()?).into(),
             "var-x" => Var::X.into(),
@@ -116,14 +114,14 @@ pub fn read(f: impl io::BufRead) -> Result<Insts> {
     Ok(insts)
 }
 
-struct Tokens<'a> {
+struct Tokens<'a, I> {
     names: &'a HashMap<String, InstIdx>,
-    tokens: SplitAsciiWhitespace<'a>,
+    tokens: I,
 }
 
-impl<'a> Tokens<'a> {
+impl<'a, I: Iterator<Item = &'a str>> Tokens<'a, I> {
     fn next(&mut self) -> Result<&'a str> {
-        self.tokens.next().ok_or_else(|| Error::MissingToken)
+        self.tokens.next().ok_or(Error::MissingToken)
     }
 
     fn arg(&mut self) -> Result<InstIdx> {
