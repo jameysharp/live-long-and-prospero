@@ -1,4 +1,4 @@
-use super::{Inst, InstIdx, Insts, VarSet};
+use super::{Const, InstIdx, Insts, VarSet};
 
 pub fn reorder(insts: &mut Insts) {
     let Some(root) = insts.len().checked_sub(1) else {
@@ -30,8 +30,7 @@ pub fn reorder(insts: &mut Insts) {
     }
     drop(stack);
 
-    let placed = usize::from(placed);
-    let mut pool = vec![Inst::Load; placed];
+    let mut pool = vec![Const::default().into(); placed];
     let mut vars = vec![VarSet::default(); placed];
     for (old, &new) in remap.iter().enumerate() {
         if let Some(new) = new {

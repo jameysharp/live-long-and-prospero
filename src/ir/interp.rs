@@ -39,7 +39,7 @@ pub fn interp(mut f: impl io::Write, insts: &Insts, size: u16) -> io::Result<()>
                             BinOp::Max => a.max(b),
                         }
                     }
-                    Inst::Load => unimplemented!("load instruction in interpreter"),
+                    Inst::Load { .. } => unimplemented!("load instruction in interpreter"),
                 };
             }
 

@@ -1,20 +1,17 @@
 use std::collections::HashMap;
 
-use super::{Const, Inst, InstIdx, Insts, VarSet};
+use super::{Const, Inst, InstIdx, Insts, Location, VarSet};
 
 pub struct Memoized {
     pub consts: Vec<Const>,
     pub funcs: [MemoizedFunc; VarSet::ALL.idx()],
 }
 
-pub type Location = u16;
-
 #[derive(Default)]
 pub struct MemoizedFunc {
     pub vars: VarSet,
     pub insts: Vec<Inst>,
-    pub location: Vec<(InstIdx, VarSet, Location)>,
-    pub outputs: Location,
+    pub outputs: Vec<InstIdx>,
 }
 
 impl MemoizedFunc {
@@ -25,9 +22,8 @@ impl MemoizedFunc {
     }
 
     fn add_output(&mut self, def: InstIdx) -> Location {
-        let idx = self.outputs;
-        self.outputs = idx.checked_add(1).unwrap();
-        self.location.push((def, self.vars, idx));
+        let idx = self.outputs.len().try_into().unwrap();
+        self.outputs.push(def);
         idx
     }
 }
@@ -43,34 +39,30 @@ pub fn memoize(insts: &Insts) -> Memoized {
 
     for (idx, inst) in insts.iter().enumerate() {
         let idx = InstIdx::try_from(idx).unwrap();
-        let vars = insts.vars(idx);
+        let result_vars = insts.vars(idx);
 
         let mut inst = inst.clone();
         for arg in inst.args_mut() {
-            let arg_vars = insts.vars(*arg);
-            let arg_def = remap[&(arg_vars, *arg)];
-            *arg = *remap.entry((vars, *arg)).or_insert_with(|| {
+            let vars = insts.vars(*arg);
+            let arg_def = remap[&(vars, *arg)];
+            *arg = *remap.entry((result_vars, *arg)).or_insert_with(|| {
                 // if we haven't already remapped this argument, then it's
                 // from a different varset and we need to load it now
-                assert_ne!(vars, arg_vars);
+                assert_ne!(result_vars, vars);
 
-                let location = &mut location[arg.idx()];
-                if *location == Location::MAX {
+                let loc = &mut location[arg.idx()];
+                if *loc == Location::MAX {
                     // we haven't yet added this arg to the outputs of the
                     // function that computes it, so do that first
-                    *location = funcs[arg_vars.idx()].add_output(arg_def);
+                    *loc = funcs[vars.idx()].add_output(arg_def);
                 }
 
-                let new_idx = funcs[vars.idx()].push(Inst::Load);
-                funcs[vars.idx()]
-                    .location
-                    .push((new_idx, arg_vars, *location));
-                new_idx
+                funcs[result_vars.idx()].push(Inst::Load { vars, loc: *loc })
             });
         }
 
-        let new_idx = funcs[vars.idx()].push(inst);
-        remap.insert((vars, idx), new_idx);
+        let new_idx = funcs[result_vars.idx()].push(inst);
+        remap.insert((result_vars, idx), new_idx);
     }
 
     // mark the last result as needing to be written too
@@ -83,14 +75,12 @@ pub fn memoize(insts: &Insts) -> Memoized {
 
     let [consts, funcs @ ..] = funcs;
     let consts = consts
-        .location
+        .outputs
         .into_iter()
-        .enumerate()
-        .map(|(expected_loc, (idx, _, loc))| {
+        .map(|idx| {
             let Inst::Const { value } = consts.insts[idx.idx()] else {
                 todo!("constant folding")
             };
-            debug_assert_eq!(loc, expected_loc as Location);
             value
         })
         .collect();

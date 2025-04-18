@@ -14,7 +14,7 @@ pub fn write(mut f: impl io::Write, insts: impl IntoIterator<Item = Inst>) -> io
             Inst::Var { var } => writeln!(f, "var-{}", var.name())?,
             Inst::UnOp { op, arg } => writeln!(f, "{} v{arg}", op.name())?,
             Inst::BinOp { op, args: [a, b] } => writeln!(f, "{} v{a} v{b}", op.name())?,
-            Inst::Load => writeln!(f, "load")?,
+            Inst::Load { vars, loc } => writeln!(f, "load {vars:?} {loc}")?,
         };
     }
     Ok(())
@@ -29,16 +29,11 @@ pub fn write_memoized(mut f: impl io::Write, memoized: &Memoized) -> io::Result<
     for func in memoized.funcs.iter() {
         if !func.insts.is_empty() {
             writeln!(f)?;
-            writeln!(f, "# func {:?}: {} outputs", func.vars, func.outputs)?;
-            for &(reg, vars, loc) in &func.location {
-                let mode = if let Inst::Load = func.insts[reg.idx()] {
-                    "load"
-                } else {
-                    "store"
-                };
-                writeln!(f, "# {mode} v{reg} {vars:?}:{loc}")?;
-            }
+            writeln!(f, "# func {:?}: {} outputs", func.vars, func.outputs.len())?;
             write(&mut f, func.insts.iter().cloned())?;
+            for (loc, &reg) in func.outputs.iter().enumerate() {
+                writeln!(f, "# store v{reg} {:?}:{loc}", func.vars)?;
+            }
         }
     }
     Ok(())

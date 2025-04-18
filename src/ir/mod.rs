@@ -123,19 +123,21 @@ impl fmt::Display for InstIdx {
     }
 }
 
+pub type Location = u16;
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum Inst {
     Const { value: Const },
     Var { var: Var },
     UnOp { op: UnOp, arg: InstIdx },
     BinOp { op: BinOp, args: [InstIdx; 2] },
-    Load,
+    Load { vars: VarSet, loc: Location },
 }
 
 impl Inst {
     pub fn args(&self) -> &[InstIdx] {
         match self {
-            Inst::Const { .. } | Inst::Var { .. } | Inst::Load => &[],
+            Inst::Const { .. } | Inst::Var { .. } | Inst::Load { .. } => &[],
             Inst::UnOp { arg, .. } => std::slice::from_ref(arg),
             Inst::BinOp { args, .. } => args,
         }
@@ -143,7 +145,7 @@ impl Inst {
 
     pub fn args_mut(&mut self) -> &mut [InstIdx] {
         match self {
-            Inst::Const { .. } | Inst::Var { .. } | Inst::Load => &mut [],
+            Inst::Const { .. } | Inst::Var { .. } | Inst::Load { .. } => &mut [],
             Inst::UnOp { arg, .. } => std::slice::from_mut(arg),
             Inst::BinOp { args, .. } => args,
         }
@@ -293,7 +295,7 @@ impl Insts {
                     Inst::Var { var } => var.into(),
                     Inst::UnOp { arg, .. } => vars(arg),
                     Inst::BinOp { args: [a, b], .. } => vars(a) | vars(b),
-                    Inst::Load => panic!("use Insts::load to create load instructions"),
+                    Inst::Load { vars, .. } => vars,
                 });
 
                 let idx = self.pool.len().try_into().unwrap();
@@ -301,13 +303,6 @@ impl Insts {
                 *e.insert(idx)
             }
         }
-    }
-
-    pub fn load(&mut self, vars: VarSet) -> InstIdx {
-        let idx = self.pool.len().try_into().unwrap();
-        self.pool.push(Inst::Load);
-        self.vars.push(vars);
-        idx
     }
 
     pub fn vars(&self, idx: InstIdx) -> VarSet {
