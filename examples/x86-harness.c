@@ -26,11 +26,11 @@ int main(int argc, char **argv) {
   float *x_buf = malloc(sizeof(float) * x_size * size);
   float *y_buf = malloc(sizeof(float) * y_size);
   assert(xy_size == 1);
-  float scale = 2.0 / (size - 1);
+  float scale = 2.0f / (size - 1);
 
-  for(unsigned col = 0; col < size; ++col) {
+  for(unsigned long col = 0UL; col < size; ++col) {
     float *x_span = x_buf + col * x_size;
-    x_span[0] = col * scale - 1.0;
+    x_span[0] = col * scale - 1.0f;
     x(x_span);
   }
 
@@ -38,17 +38,17 @@ int main(int argc, char **argv) {
   size_t row_size = (size + 7) / 8;
   uint8_t *row_buffer = malloc(row_size);
 
-  for(unsigned row = 0; row < size; ++row) {
+  for(unsigned long row = 0UL; row < size; ++row) {
     memset(row_buffer, 0, row_size);
 
-    y_buf[0] = -(row * scale - 1.0);
+    y_buf[0] = -(row * scale - 1.0f);
     y(NULL, y_buf);
 
-    for(unsigned col = 0; col < size; ++col) {
+    for(unsigned long col = 0UL; col < size; ++col) {
       float *x_span = x_buf + col * x_size;
       float result;
       xy(x_span, y_buf, &result);
-      if(result >= 0.0) {
+      if(result >= 0.0f) {
         row_buffer[col >> 3] |= 0x80 >> (col & 7);
       }
     }
