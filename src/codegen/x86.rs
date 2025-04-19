@@ -13,30 +13,30 @@ pub fn write(
 ) -> io::Result<()> {
     // requires AVX for v*ss three-operand instructions
     let zero_reg = Xmm(15.try_into().unwrap());
-    let scratch_reg = "rax";
 
     // prologue
     let frame_size = usize::from(stack_slots) * 4;
     if frame_size > 0 {
-        writeln!(f, "sub rsp, {}", frame_size)?;
+        writeln!(f, "sub ${:#x},%rsp", frame_size)?;
     }
-    writeln!(f, "xorps {0}, {0}", zero_reg)?;
+    writeln!(f, "xorps {0},{0}", zero_reg)?;
 
     for inst in insts {
         match inst {
             AsmInst::Const { reg, value } => {
-                writeln!(f, "mov {scratch_reg}, {}", value.bits())?;
-                writeln!(f, "movd {}, {scratch_reg}", Xmm(reg))?;
+                let scratch_reg = "%eax";
+                writeln!(f, "movl ${:#x},{scratch_reg}", value.bits())?;
+                writeln!(f, "movd {scratch_reg},{}", Xmm(reg))?;
             }
             AsmInst::Var { reg, var } => {
                 // FIXME stop assuming that var-x is the first value in the x mem-space
                 let src = Address(VarSet::from(var).into(), 0);
-                writeln!(f, "movd {}, {src}", Xmm(reg))?;
+                writeln!(f, "movd {src},{}", Xmm(reg))?;
             }
             AsmInst::UnOp { reg, op, arg } => match op {
-                UnOp::Neg => writeln!(f, "vsubss {}, {}, {}", Xmm(reg), zero_reg, Xmm(arg))?,
-                UnOp::Square => writeln!(f, "vmulss {}, {1}, {1}", Xmm(reg), Xmm(arg))?,
-                UnOp::Sqrt => writeln!(f, "sqrtss {}, {}", Xmm(reg), Xmm(arg))?,
+                UnOp::Neg => writeln!(f, "vsubss {},{},{}", Xmm(arg), zero_reg, Xmm(reg))?,
+                UnOp::Square => writeln!(f, "vmulss {},{},{}", Xmm(arg), Xmm(arg), Xmm(reg))?,
+                UnOp::Sqrt => writeln!(f, "sqrtss {},{}", Xmm(arg), Xmm(reg))?,
             },
             AsmInst::BinOp {
                 reg,
@@ -50,19 +50,19 @@ pub fn write(
                     BinOp::Min => "vminss",
                     BinOp::Max => "vmaxss",
                 };
-                writeln!(f, "{opcode} {}, {}, {}", Xmm(reg), Xmm(a), Xmm(b))?;
+                writeln!(f, "{opcode} {},{},{}", Xmm(b), Xmm(a), Xmm(reg))?;
             }
             AsmInst::Load { reg, mem, loc } => {
-                writeln!(f, "movd {}, {}", Xmm(reg), Address(mem, loc))?;
+                writeln!(f, "movd {},{}", Address(mem, loc), Xmm(reg))?;
             }
             AsmInst::Store { reg, mem, loc } => {
-                writeln!(f, "movd {}, {}", Address(mem, loc), Xmm(reg))?;
+                writeln!(f, "movd {},{}", Xmm(reg), Address(mem, loc))?;
             }
         }
     }
 
     if frame_size > 0 {
-        writeln!(f, "add rsp, {}", frame_size)?;
+        writeln!(f, "add ${:#x},%rsp", frame_size)?;
     }
     writeln!(f, "ret")
 }
@@ -71,7 +71,7 @@ struct Xmm(Register);
 
 impl fmt::Display for Xmm {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "xmm{}", self.0.idx())
+        write!(f, "%xmm{}", self.0.idx())
     }
 }
 
@@ -79,13 +79,12 @@ struct Address(MemorySpace, Location);
 
 impl fmt::Display for Address {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let memory_spaces = [
-            "rsp", "consts", "rdi", "rsi", "rdx", "rcx", "r8", "r9", "r10",
-        ];
-        write!(f, "[{}", memory_spaces[self.0.idx()])?;
+        let memory_space = [
+            "(%rsp)", "+consts", "(%rdi)", "(%rsi)", "(%rdx)", "(%rcx)", "(%r8)", "(%r9)", "(%r10)",
+        ][self.0.idx()];
         if self.1 > 0 {
-            write!(f, "+{}", usize::from(self.1) * 4)?;
+            write!(f, "{:#x}", usize::from(self.1) * 4)?;
         }
-        write!(f, "]")
+        write!(f, "{}", memory_space)
     }
 }
