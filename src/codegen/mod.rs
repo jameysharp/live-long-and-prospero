@@ -3,6 +3,7 @@ use std::num::{NonZero, TryFromIntError};
 use crate::ir::{BinOp, Const, Location, UnOp, Var, VarSet};
 
 pub mod regalloc;
+pub mod x86;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Register(NonZero<u8>);
@@ -28,6 +29,10 @@ pub struct MemorySpace(NonZero<u8>);
 
 impl MemorySpace {
     pub const STACK: Self = Self(NonZero::<u8>::MIN);
+
+    pub fn idx(self) -> usize {
+        usize::from(self.0.get()) - 1
+    }
 }
 
 impl From<VarSet> for MemorySpace {

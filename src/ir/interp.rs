@@ -19,7 +19,7 @@ pub fn interp(mut f: impl io::Write, insts: &Insts, size: u16) -> io::Result<()>
             for (idx, inst) in insts.iter().enumerate() {
                 regs[idx] = match *inst {
                     Inst::Const { value } => value.value(),
-                    Inst::Var { var } => vars[usize::from(var.0)],
+                    Inst::Var { var } => vars[var as usize],
                     Inst::UnOp { op, arg } => {
                         let arg = regs[arg.idx()];
                         match op {

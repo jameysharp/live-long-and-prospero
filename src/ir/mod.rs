@@ -23,6 +23,10 @@ impl Const {
     pub fn value(self) -> f32 {
         f32::from_bits(self.0)
     }
+
+    pub fn bits(self) -> u32 {
+        self.0
+    }
 }
 
 impl fmt::Display for Const {
@@ -86,15 +90,15 @@ impl BinOp {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct Var(u8);
+pub enum Var {
+    X,
+    Y,
+    Z,
+}
 
 impl Var {
-    pub const X: Self = Var(0);
-    pub const Y: Self = Var(1);
-    pub const Z: Self = Var(2);
-
     pub fn name(self) -> char {
-        (b'x' + self.0).into()
+        (b'x' + self as u8).into()
     }
 }
 
@@ -195,7 +199,7 @@ impl VarSet {
 
 impl From<Var> for VarSet {
     fn from(value: Var) -> Self {
-        VarSet(1 << value.0)
+        VarSet(1 << value as u8)
     }
 }
 
@@ -204,7 +208,12 @@ impl Iterator for VarSet {
 
     fn next(&mut self) -> Option<Var> {
         (self.0 != 0).then(|| {
-            let var = Var(self.0.trailing_zeros() as u8);
+            let var = match self.0.trailing_zeros() {
+                0 => Var::X,
+                1 => Var::Y,
+                2 => Var::Z,
+                _ => unreachable!(),
+            };
             self.0 &= !VarSet::from(var).0;
             var
         })

@@ -26,7 +26,7 @@ pub fn alloc(insts: &[Inst], output_vars: VarSet, outputs: &[InstIdx]) -> (Vec<A
         allocs[idx.idx()].initial_location(output_vars.into(), loc.try_into().unwrap());
     }
 
-    let mut regs = Registers::new(allocs, 8);
+    let mut regs = Registers::new(allocs, 15);
 
     for (idx, inst) in insts.iter().enumerate().rev() {
         let idx = idx.try_into().unwrap();
