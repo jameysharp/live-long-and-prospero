@@ -80,7 +80,15 @@ struct Address(MemorySpace, Location);
 impl fmt::Display for Address {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let memory_space = [
-            "(%rsp)", "+consts", "(%rdi)", "(%rsi)", "(%rdx)", "(%rcx)", "(%r8)", "(%r9)", "(%r10)",
+            "(%rsp)",
+            "+consts(%rip)",
+            "(%rdi)",
+            "(%rsi)",
+            "(%rdx)",
+            "(%rcx)",
+            "(%r8)",
+            "(%r9)",
+            "(%r10)",
         ][self.0.idx()];
         if self.1 > 0 {
             write!(f, "{:#x}", usize::from(self.1) * 4)?;
