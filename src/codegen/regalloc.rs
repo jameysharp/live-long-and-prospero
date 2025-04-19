@@ -1,0 +1,278 @@
+use std::mem::replace;
+
+use crate::ir::{Inst, InstIdx, Location, VarSet};
+
+use super::{AsmInst, MemorySpace, Register};
+
+// Modeled after https://www.mattkeeter.com/blog/2022-10-04-ssra/, except a
+// value may be both in memory and in a register at the same time. That allows
+// memory inputs and outputs for the function to be treated the same as stack
+// spill-slots, as well as reducing the number of store instructions and, in my
+// opinion, simplifying the implementation considerably.
+
+pub fn alloc(insts: &[Inst], output_vars: VarSet, outputs: &[InstIdx]) -> (Vec<AsmInst>, Location) {
+    let mut allocs: Vec<Allocation> = insts
+        .iter()
+        .map(|inst| {
+            let mut alloc = Allocation::default();
+            if let Inst::Load { vars, loc } = *inst {
+                alloc.initial_location(vars.into(), loc);
+            }
+            alloc
+        })
+        .collect();
+
+    for (loc, &idx) in outputs.iter().enumerate() {
+        allocs[idx.idx()].initial_location(output_vars.into(), loc.try_into().unwrap());
+    }
+
+    let mut regs = Registers::new(allocs, 8);
+
+    for (idx, inst) in insts.iter().enumerate().rev() {
+        let idx = idx.try_into().unwrap();
+        match *inst {
+            Inst::Const { value } => regs.emit(idx, |reg, _| AsmInst::Const { reg, value }),
+            Inst::Var { var } => regs.emit(idx, |reg, _| AsmInst::Var { reg, var }),
+            Inst::UnOp { op, arg } => regs.emit(idx, |reg, regs| {
+                let arg = regs.get_reg(arg);
+                AsmInst::UnOp { reg, op, arg }
+            }),
+            Inst::BinOp { op, args } => regs.emit(idx, |reg, regs| {
+                let args = args.map(|arg| regs.get_reg(arg));
+                AsmInst::BinOp { reg, op, args }
+            }),
+
+            // A load instruction is special. We never store its value, because
+            // it's already in memory. And if it doesn't have a register
+            // assigned to it at this point, that means no instruction needs
+            // the load to happen here, so we can skip it. That could happen
+            // either if the result of the load is never used (unlikely) or if,
+            // sometime between allocating an instruction that uses this value
+            // and now, another instruction needed a register and stole the one
+            // we'd have used. But in that case, the load is emitted at that
+            // time, so we have nothing to do now.
+            Inst::Load { vars, loc } => {
+                if let Some(reg) = regs.allocs[idx.idx()].reg {
+                    let mem = vars.into();
+                    regs.output.push(AsmInst::Load { reg, mem, loc });
+                    regs.free_reg(reg);
+                }
+            }
+        }
+    }
+
+    (regs.output, regs.stack_slots)
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct Allocation {
+    reg: Option<Register>,
+    mem: Option<MemorySpace>,
+    loc: Location,
+}
+
+impl Allocation {
+    fn initial_location(&mut self, mem: MemorySpace, loc: Location) {
+        assert_eq!(self, &Allocation::default());
+        self.mem = Some(mem);
+        self.loc = loc;
+    }
+}
+
+struct Registers {
+    allocs: Vec<Allocation>,
+    recent: Lru,
+    live: Vec<Option<InstIdx>>,
+    stack_slots: Location,
+    free_slots: Vec<(MemorySpace, Location)>,
+    output: Vec<AsmInst>,
+}
+
+impl Registers {
+    fn new(allocs: Vec<Allocation>, regs: usize) -> Self {
+        Registers {
+            allocs,
+            recent: Lru::new(regs),
+            live: vec![None; regs],
+            stack_slots: 0,
+            free_slots: Vec::new(),
+            output: Vec::new(),
+        }
+    }
+
+    fn emit(&mut self, idx: InstIdx, inst: impl FnOnce(Register, &mut Registers) -> AsmInst) {
+        let reg = self.get_output_reg(idx);
+        let inst = inst(reg, self);
+        self.emit_common(idx, reg, inst);
+    }
+
+    fn get_output_reg(&mut self, idx: InstIdx) -> Register {
+        let reg = self.get_reg(idx);
+        self.free_reg(reg);
+        reg
+    }
+
+    fn emit_common(&mut self, idx: InstIdx, reg: Register, inst: AsmInst) {
+        if let Allocation {
+            mem: Some(mem),
+            loc,
+            ..
+        } = self.allocs[idx.idx()]
+        {
+            self.output.push(AsmInst::Store { reg, mem, loc });
+            // Any place we're going to store to, not just stack slots, can be
+            // safely used as a spill slot for earlier instructions.
+            self.free_slots.push((mem, loc));
+        }
+        self.output.push(inst);
+    }
+
+    fn get_reg(&mut self, idx: InstIdx) -> Register {
+        // If this value already has a register allocated, return that.
+        if let Some(reg) = self.allocs[idx.idx()].reg {
+            debug_assert_eq!(Some(idx), self.live[reg.idx()]);
+            self.recent.mark_used(reg);
+            return reg;
+        }
+
+        // Otherwise, pick a register and hope nobody needs it too soon.
+        let reg = Register::try_from(self.recent.pop()).unwrap();
+
+        // Remember that this register now holds this value, and check what it
+        // held before.
+        self.allocs[idx.idx()].reg = Some(reg);
+        let live = self.live[reg.idx()].replace(idx);
+
+        // Was the selected register already holding another value?
+        if let Some(live) = live {
+            let alloc = &mut self.allocs[live.idx()];
+            debug_assert_eq!(Some(reg), alloc.reg);
+
+            // Make sure that value gets spilled, when we get to its definition,
+            // by ensuring it has a memory location allocated.
+            let (mem, loc) = if let Some(mem) = alloc.mem {
+                (mem, alloc.loc)
+            } else if let Some(slot) = self.free_slots.pop() {
+                slot
+            } else {
+                let new_slot = self.stack_slots;
+                self.stack_slots += 1;
+                (MemorySpace::STACK, new_slot)
+            };
+
+            // Some later instruction wants this value in this register, so load
+            // it for them.
+            self.output.push(AsmInst::Load { reg, mem, loc });
+
+            // Remember that this value is only in memory now.
+            *alloc = Allocation {
+                reg: None,
+                mem: Some(mem),
+                loc,
+            };
+        }
+
+        reg
+    }
+
+    fn free_reg(&mut self, reg: Register) {
+        self.recent.mark_unused(reg);
+        self.live[reg.idx()] = None;
+    }
+}
+
+struct Lru {
+    data: Vec<LruNode>,
+    head: Register,
+}
+
+struct LruNode {
+    prev: Register,
+    next: Register,
+}
+
+impl Lru {
+    pub fn new(len: usize) -> Self {
+        let data = (0..len)
+            .map(|i| LruNode {
+                prev: ((i + len - 1) % len).try_into().unwrap(),
+                next: ((i + 1) % len).try_into().unwrap(),
+            })
+            .collect();
+        let head = 0.try_into().unwrap();
+        Self { head, data }
+    }
+
+    /// Mark the given node as newest
+    pub fn mark_used(&mut self, i: Register) {
+        self.mark_unused(i);
+        self.head = i;
+    }
+
+    /// Mark the given node as oldest
+    pub fn mark_unused(&mut self, i: Register) {
+        if i == self.head {
+            self.head = self.data[i.idx()].next;
+            return;
+        }
+
+        // If this wasn't the oldest node, then remove it and
+        // reinsert it right before the head of the list.
+        let next = self.head;
+        let prev = replace(&mut self.data[next.idx()].prev, i);
+        if prev != i {
+            self.data[prev.idx()].next = i;
+            let LruNode { prev, next } = replace(&mut self.data[i.idx()], LruNode { next, prev });
+            self.data[prev.idx()].next = next;
+            self.data[next.idx()].prev = prev;
+        }
+    }
+
+    /// Look up the oldest node in the list, marking it as newest
+    pub fn pop(&mut self) -> Register {
+        let out = self.data[self.head.idx()].prev;
+        self.head = out; // rotate so that oldest becomes newest
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tiny_lru() {
+        let mut lru = Lru::new(2);
+        lru.mark_used(0.try_into().unwrap());
+        assert_eq!(lru.pop().idx(), 1);
+        assert_eq!(lru.pop().idx(), 0);
+
+        lru.mark_used(1.try_into().unwrap());
+        assert_eq!(lru.pop().idx(), 0);
+        assert_eq!(lru.pop().idx(), 1);
+    }
+
+    #[test]
+    fn test_medium_lru() {
+        let mut lru = Lru::new(10);
+        lru.mark_used(0.try_into().unwrap());
+        for _ in 0..9 {
+            assert_ne!(lru.pop().idx(), 0);
+        }
+        assert_eq!(lru.pop().idx(), 0);
+
+        lru.mark_used(1.try_into().unwrap());
+        for _ in 0..9 {
+            assert_ne!(lru.pop().idx(), 1);
+        }
+        assert_eq!(lru.pop().idx(), 1);
+
+        lru.mark_used(4.try_into().unwrap());
+        lru.mark_used(5.try_into().unwrap());
+        for _ in 0..8 {
+            assert!(!matches!(lru.pop().idx(), 4 | 5));
+        }
+        assert_eq!(lru.pop().idx(), 4);
+        assert_eq!(lru.pop().idx(), 5);
+    }
+}
