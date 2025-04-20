@@ -10,7 +10,11 @@ use super::{AsmInst, MemorySpace, Register};
 // spill-slots, as well as reducing the number of store instructions and, in my
 // opinion, simplifying the implementation considerably.
 
-pub fn alloc(insts: &[Inst], output_vars: VarSet, outputs: &[InstIdx]) -> (Vec<AsmInst>, Location) {
+pub fn alloc(
+    insts: &[Inst],
+    output_vars: VarSet,
+    outputs: &[Option<InstIdx>],
+) -> (Vec<AsmInst>, Location) {
     let mut allocs: Vec<Allocation> = insts
         .iter()
         .map(|inst| {
@@ -23,7 +27,9 @@ pub fn alloc(insts: &[Inst], output_vars: VarSet, outputs: &[InstIdx]) -> (Vec<A
         .collect();
 
     for (loc, &idx) in outputs.iter().enumerate() {
-        allocs[idx.idx()].initial_location(output_vars.into(), loc.try_into().unwrap());
+        if let Some(idx) = idx {
+            allocs[idx.idx()].initial_location(output_vars.into(), loc.try_into().unwrap());
+        }
     }
 
     let mut regs = Registers::new(allocs, 15);

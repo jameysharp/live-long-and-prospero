@@ -24,12 +24,13 @@ pub fn write(
     for inst in insts {
         match inst {
             AsmInst::Const { reg, value } => {
+                // Not used for memoized functions
                 let scratch_reg = "%eax";
                 writeln!(f, "movl ${:#x},{scratch_reg}", value.bits())?;
                 writeln!(f, "movd {scratch_reg},{}", Xmm(reg))?;
             }
             AsmInst::Var { reg, var } => {
-                // FIXME stop assuming that var-x is the first value in the x mem-space
+                // Not used for memoized functions
                 let src = Address(VarSet::from(var).into(), 0);
                 writeln!(f, "movd {src},{}", Xmm(reg))?;
             }

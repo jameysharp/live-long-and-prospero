@@ -11,7 +11,7 @@ pub struct Memoized {
 pub struct MemoizedFunc {
     pub vars: VarSet,
     pub insts: Vec<Inst>,
-    pub outputs: Vec<InstIdx>,
+    pub outputs: Vec<Option<InstIdx>>,
 }
 
 impl MemoizedFunc {
@@ -23,7 +23,7 @@ impl MemoizedFunc {
 
     fn add_output(&mut self, def: InstIdx) -> Location {
         let idx = self.outputs.len().try_into().unwrap();
-        self.outputs.push(def);
+        self.outputs.push(Some(def));
         idx
     }
 }
@@ -34,6 +34,10 @@ pub fn memoize(insts: &Insts) -> Memoized {
         func.vars = VarSet(idx as u8);
     }
 
+    for var in VarSet::ALL {
+        funcs[VarSet::from(var).idx()].outputs.push(None);
+    }
+
     let mut location: Vec<Location> = vec![Location::MAX; insts.len()];
     let mut remap: HashMap<(VarSet, InstIdx), InstIdx> = HashMap::new();
 
@@ -41,25 +45,34 @@ pub fn memoize(insts: &Insts) -> Memoized {
         let idx = InstIdx::try_from(idx).unwrap();
         let result_vars = insts.vars(idx);
 
-        let mut inst = inst.clone();
-        for arg in inst.args_mut() {
-            let vars = insts.vars(*arg);
-            let arg_def = remap[&(vars, *arg)];
-            *arg = *remap.entry((result_vars, *arg)).or_insert_with(|| {
-                // if we haven't already remapped this argument, then it's
-                // from a different varset and we need to load it now
-                assert_ne!(result_vars, vars);
+        let inst = if let Inst::Var { .. } = inst {
+            location[idx.idx()] = 0;
+            Inst::Load {
+                vars: result_vars,
+                loc: 0,
+            }
+        } else {
+            let mut inst = inst.clone();
+            for arg in inst.args_mut() {
+                let vars = insts.vars(*arg);
+                let arg_def = remap[&(vars, *arg)];
+                *arg = *remap.entry((result_vars, *arg)).or_insert_with(|| {
+                    // if we haven't already remapped this argument, then it's
+                    // from a different varset and we need to load it now
+                    assert_ne!(result_vars, vars);
 
-                let loc = &mut location[arg.idx()];
-                if *loc == Location::MAX {
-                    // we haven't yet added this arg to the outputs of the
-                    // function that computes it, so do that first
-                    *loc = funcs[vars.idx()].add_output(arg_def);
-                }
+                    let loc = &mut location[arg.idx()];
+                    if *loc == Location::MAX {
+                        // we haven't yet added this arg to the outputs of the
+                        // function that computes it, so do that first
+                        *loc = funcs[vars.idx()].add_output(arg_def);
+                    }
 
-                funcs[result_vars.idx()].push(Inst::Load { vars, loc: *loc })
-            });
-        }
+                    funcs[result_vars.idx()].push(Inst::Load { vars, loc: *loc })
+                });
+            }
+            inst
+        };
 
         let new_idx = funcs[result_vars.idx()].push(inst);
         remap.insert((result_vars, idx), new_idx);
@@ -78,7 +91,7 @@ pub fn memoize(insts: &Insts) -> Memoized {
         .outputs
         .into_iter()
         .map(|idx| {
-            let Inst::Const { value } = consts.insts[idx.idx()] else {
+            let Inst::Const { value } = consts.insts[idx.unwrap().idx()] else {
                 todo!("constant folding")
             };
             value

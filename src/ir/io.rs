@@ -32,7 +32,9 @@ pub fn write_memoized(mut f: impl io::Write, memoized: &Memoized) -> io::Result<
             writeln!(f, "# func {:?}: {} outputs", func.vars, func.outputs.len())?;
             write(&mut f, func.insts.iter().cloned())?;
             for (loc, &reg) in func.outputs.iter().enumerate() {
-                writeln!(f, "# store v{reg} {:?}:{loc}", func.vars)?;
+                if let Some(reg) = reg {
+                    writeln!(f, "# store v{reg} {:?}:{loc}", func.vars)?;
+                }
             }
         }
     }
