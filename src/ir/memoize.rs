@@ -38,12 +38,12 @@ pub fn memoize(insts: &Insts) -> Memoized {
         funcs[VarSet::from(var).idx()].outputs.push(None);
     }
 
-    let mut location: Vec<Location> = vec![Location::MAX; insts.len()];
+    let mut location: Vec<Location> = vec![Location::MAX; insts.pool.len()];
     let mut remap: HashMap<(VarSet, InstIdx), InstIdx> = HashMap::new();
 
-    for (idx, inst) in insts.iter().enumerate() {
+    for (idx, inst) in insts.pool.iter().enumerate() {
         let idx = InstIdx::try_from(idx).unwrap();
-        let result_vars = insts.vars(idx);
+        let result_vars = insts.vars[idx.idx()];
 
         let inst = if let Inst::Var { .. } = inst {
             location[idx.idx()] = 0;
@@ -54,7 +54,7 @@ pub fn memoize(insts: &Insts) -> Memoized {
         } else {
             let mut inst = inst.clone();
             for arg in inst.args_mut() {
-                let vars = insts.vars(*arg);
+                let vars = insts.vars[arg.idx()];
                 let arg_def = remap[&(vars, *arg)];
                 *arg = *remap.entry((result_vars, *arg)).or_insert_with(|| {
                     // if we haven't already remapped this argument, then it's

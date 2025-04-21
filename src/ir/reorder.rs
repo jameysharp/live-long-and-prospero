@@ -1,19 +1,19 @@
 use super::{Const, InstIdx, Insts, VarSet};
 
 pub fn reorder(insts: &mut Insts) {
-    let Some(root) = insts.len().checked_sub(1) else {
+    let Some(root) = insts.pool.len().checked_sub(1) else {
         return;
     };
     insts.gvn.clear();
 
     let mut placed = 0;
-    let mut remap = vec![None; insts.len()];
+    let mut remap = vec![None; insts.pool.len()];
     let mut stack = vec![InstIdx::try_from(root).unwrap()];
     while let Some(&idx) = stack.last() {
         let idx = idx.idx();
         if remap[idx] == None {
             let mut changed = false;
-            for &arg in insts[idx].args().iter().rev() {
+            for &arg in insts.pool[idx].args().iter().rev() {
                 if remap[arg.idx()] == None {
                     stack.push(arg);
                     changed = true;

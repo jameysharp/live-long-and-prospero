@@ -7,7 +7,7 @@ pub fn interp(mut f: impl io::Write, insts: &Insts, size: u16) -> io::Result<()>
     writeln!(f, "P4 {size} {size}")?;
 
     let mut row = vec![0u8; (usize::from(size) + 7) / 8];
-    let mut regs = vec![0f32; insts.len()];
+    let mut regs = vec![0f32; insts.pool.len()];
     let mut vars = [0f32; 2];
     let scale = 2.0 / f32::from(size - 1);
 
@@ -16,7 +16,7 @@ pub fn interp(mut f: impl io::Write, insts: &Insts, size: u16) -> io::Result<()>
         for x in 0..size {
             vars[0] = f32::from(x) * scale - 1.0;
 
-            for (idx, inst) in insts.iter().enumerate() {
+            for (idx, inst) in insts.pool.iter().enumerate() {
                 regs[idx] = match *inst {
                     Inst::Const { value } => value.value(),
                     Inst::Var { var } => vars[var as usize],

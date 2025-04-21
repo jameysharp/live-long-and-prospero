@@ -47,6 +47,7 @@ in pkgs.mkShell {
 
     #(with-nightly pkgs.cargo-fuzz)
     #pkgs.cargo-criterion
+    pkgs.hyperfine
 
     # To update the versions of tools installed in this development
     # environment, run `niv update`.

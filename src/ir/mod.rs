@@ -1,9 +1,8 @@
 use std::collections::HashMap;
-use std::collections::hash_map::Entry;
 use std::fmt;
 use std::hash::Hash;
 use std::num::{NonZeroU16, TryFromIntError};
-use std::ops::{BitOr, Deref};
+use std::ops::BitOr;
 
 pub mod interp;
 pub mod io;
@@ -244,8 +243,8 @@ impl BitOr for VarSet {
 
 #[derive(Default)]
 pub struct Insts {
-    pool: Vec<Inst>,
-    vars: Vec<VarSet>,
+    pub pool: Vec<Inst>,
+    pub vars: Vec<VarSet>,
     gvn: HashMap<Inst, InstIdx>,
 }
 
@@ -257,11 +256,7 @@ impl Insts {
                 arg,
             } => {
                 // Squaring -x is the same as squaring x.
-                if let Inst::UnOp {
-                    op: UnOp::Neg,
-                    arg: pos,
-                } = self.pool[arg.idx()]
-                {
+                if let Some(pos) = self.pool[arg.idx()].is_unop(UnOp::Neg) {
                     *arg = pos;
                 }
             }
@@ -292,37 +287,19 @@ impl Insts {
             _ => (),
         }
 
-        let vars = |idx: InstIdx| self.vars[idx.idx()];
+        *self.gvn.entry(inst).or_insert_with_key(|inst| {
+            let vars = |idx: InstIdx| self.vars[idx.idx()];
+            self.vars.push(match *inst {
+                Inst::Const { .. } => VarSet::default(),
+                Inst::Var { var } => var.into(),
+                Inst::UnOp { arg, .. } => vars(arg),
+                Inst::BinOp { args: [a, b], .. } => vars(a) | vars(b),
+                Inst::Load { vars, .. } => vars,
+            });
 
-        match self.gvn.entry(inst) {
-            // If we've already added the same instruction, reuse it.
-            Entry::Occupied(e) => *e.get(),
-
-            Entry::Vacant(e) => {
-                self.vars.push(match *e.key() {
-                    Inst::Const { .. } => VarSet::default(),
-                    Inst::Var { var } => var.into(),
-                    Inst::UnOp { arg, .. } => vars(arg),
-                    Inst::BinOp { args: [a, b], .. } => vars(a) | vars(b),
-                    Inst::Load { vars, .. } => vars,
-                });
-
-                let idx = self.pool.len().try_into().unwrap();
-                self.pool.push(e.key().clone());
-                *e.insert(idx)
-            }
-        }
-    }
-
-    pub fn vars(&self, idx: InstIdx) -> VarSet {
-        self.vars[idx.idx()]
-    }
-}
-
-impl Deref for Insts {
-    type Target = [Inst];
-
-    fn deref(&self) -> &Self::Target {
-        &self.pool
+            let idx = self.pool.len().try_into().unwrap();
+            self.pool.push(inst.clone());
+            idx
+        })
     }
 }
