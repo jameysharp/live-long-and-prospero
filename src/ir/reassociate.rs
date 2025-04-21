@@ -1,7 +1,7 @@
 use std::mem::swap;
 use std::num::Saturating;
 
-use super::{BinOp, Inst, InstIdx, Insts, UnOp, VarSet};
+use super::{BinOp, Inst, InstIdx, Insts, VarSet};
 
 pub fn reassociate(insts: &mut Insts) {
     // for every commutative binary operator (op a b) we'll establish this invariant:
@@ -27,32 +27,14 @@ pub fn reassociate(insts: &mut Insts) {
 
     for idx in 0..insts.pool.len() {
         let idx = InstIdx::try_from(idx).unwrap();
-        if let Inst::BinOp { op, args } = insts.pool[idx.idx()] {
-            state.visit_binop(idx, op, args);
-            while let Some((op, indexes)) = state.stack.pop() {
-                fn subtree(indexes: [InstIdx; 3], insts: &mut [Inst]) -> [&mut Inst; 3] {
-                    let subtree = insts.get_disjoint_mut(indexes.map(InstIdx::idx)).unwrap();
-                    debug_assert_eq!(subtree[0].args(), &indexes[1..]);
-                    subtree
-                }
-
-                let [ir, ia, ib] = subtree(indexes, &mut insts.pool);
-
-                let new_root = state.extract_neg(indexes, op, ia, ib);
-                let mut subtree = if let Some((new_root, r, [a, b])) = new_root {
-                    *ir = new_root;
-                    debug_assert_eq!(state.vars(a), state.vars(b));
-                    let new_indexes = [r, a, b];
-                    debug_assert_ne!(indexes, new_indexes);
-                    for old in &indexes[1..] {
-                        if !new_indexes.contains(old) {
-                            state.uses[old.idx()] -= 1;
-                        }
-                    }
-                    subtree(new_indexes, &mut insts.pool)
-                } else {
-                    [ir, ia, ib]
-                };
+        if let Inst::BinOp { args, .. } = insts.pool[idx.idx()] {
+            state.visit_binop(idx, args);
+            while let Some(indexes) = state.stack.pop() {
+                let mut subtree = insts
+                    .pool
+                    .get_disjoint_mut(indexes.map(InstIdx::idx))
+                    .unwrap();
+                debug_assert_eq!(subtree[0].args(), &indexes[1..]);
 
                 state.rebalance_add_or_sub(&mut subtree);
                 state.rebalance_commutative(subtree);
@@ -64,7 +46,7 @@ pub fn reassociate(insts: &mut Insts) {
 struct State<'a> {
     vars: &'a mut [VarSet],
     uses: Vec<Saturating<u8>>,
-    stack: Vec<(BinOp, [InstIdx; 3])>,
+    stack: Vec<[InstIdx; 3]>,
 }
 
 impl State<'_> {
@@ -76,66 +58,12 @@ impl State<'_> {
         self.uses[root.idx()].0 < 2
     }
 
-    fn visit_binop(&mut self, root: InstIdx, op: BinOp, [a, b]: [InstIdx; 2]) {
+    fn visit_binop(&mut self, root: InstIdx, [a, b]: [InstIdx; 2]) {
         // if both args are the same, their vars are equal, and we'd blow up
         // in get_disjoint_mut. can't reassociate that case without duplicating
         // instructions anyway.
         if a != b && self.vars(a) == self.vars(b) {
-            self.stack.push((op, [root, a, b]));
-        }
-    }
-
-    fn extract_neg(
-        &mut self,
-        [r, a, b]: [InstIdx; 3],
-        op: BinOp,
-        ia: &mut Inst,
-        ib: &mut Inst,
-    ) -> Option<(Inst, InstIdx, [InstIdx; 2])> {
-        let replace = |op, args| Some((Inst::BinOp { op, args }, r, args));
-
-        let mut negate = |op, arg, iarg: &mut Inst, args| {
-            self.can_reuse(arg).then(|| {
-                *iarg = Inst::BinOp { op, args };
-                self.vars[arg.idx()] = self.vars(r);
-                (Inst::UnOp { op: UnOp::Neg, arg }, arg, args)
-            })
-        };
-
-        match (op, ia.is_unop(UnOp::Neg), ib.is_unop(UnOp::Neg)) {
-            // (-x) + y = y - x
-            (BinOp::Add, Some(na), None) => replace(BinOp::Sub, [b, na]),
-            // x + (-y) = x - y
-            (BinOp::Add, None, Some(nb)) => replace(BinOp::Sub, [a, nb]),
-            // (-x) + (-y) = -(x + y)
-            (BinOp::Add, Some(na), Some(nb)) => {
-                negate(BinOp::Add, a, ia, [na, nb]).or_else(|| negate(BinOp::Add, b, ib, [na, nb]))
-            }
-
-            // (-x) - y = -(x + y)
-            (BinOp::Sub, Some(na), None) => negate(BinOp::Add, a, ia, [na, b]),
-            // x - (-y) = x + y
-            (BinOp::Sub, None, Some(nb)) => replace(BinOp::Add, [a, nb]),
-            // (-x) - (-y) = y - x
-            (BinOp::Sub, Some(na), Some(nb)) => replace(BinOp::Sub, [nb, na]),
-
-            // (-x) * y = -(x * y)
-            (BinOp::Mul, Some(na), None) => negate(BinOp::Mul, a, ia, [na, b]),
-            // x * (-y) = -(x * y)
-            (BinOp::Mul, None, Some(nb)) => negate(BinOp::Mul, b, ib, [a, nb]),
-            // (-x) * (-y) = x * y
-            (BinOp::Mul, Some(na), Some(nb)) => replace(BinOp::Mul, [na, nb]),
-
-            // min(-x, -y) = -max(x, y)
-            (BinOp::Min, Some(na), Some(nb)) => {
-                negate(BinOp::Max, a, ia, [na, nb]).or_else(|| negate(BinOp::Max, b, ib, [na, nb]))
-            }
-            // max(-x, -y) = -min(x, y)
-            (BinOp::Max, Some(na), Some(nb)) => {
-                negate(BinOp::Min, a, ia, [na, nb]).or_else(|| negate(BinOp::Min, b, ib, [na, nb]))
-            }
-
-            _ => None,
+            self.stack.push([root, a, b]);
         }
     }
 
@@ -197,12 +125,12 @@ impl State<'_> {
         let op = BinOp::Add;
         debug_assert_eq!(args1.is_none(), sign1);
         if let Some(args) = args1 {
-            self.visit_binop(a, op, args);
+            self.visit_binop(a, args);
             **inst1 = Inst::BinOp { op, args };
         }
         debug_assert_eq!(args2.is_none(), sign2);
         if let Some(args) = args2 {
-            self.visit_binop(b, op, args);
+            self.visit_binop(b, args);
             **inst2 = Inst::BinOp { op, args };
         }
 
@@ -230,7 +158,7 @@ impl State<'_> {
                 // uses besides in inst, and at this point we can't
                 // reassociate without modifying both
                 if self.can_reuse(*a) && self.can_reuse(*b) {
-                    self.rebalance(*op, args, args1, args2);
+                    self.rebalance(args, args1, args2);
                 }
             } else {
                 // inst2 matched but inst1 did not, and they have the
@@ -242,7 +170,6 @@ impl State<'_> {
 
     fn rebalance(
         &mut self,
-        op: BinOp,
         args: &mut [InstIdx; 2],
         args1: &mut [InstIdx; 2],
         args2: &mut [InstIdx; 2],
@@ -270,7 +197,7 @@ impl State<'_> {
                     if let Some(inst) = inst {
                         let [a, b] = new_args;
                         self.vars[inst.idx()] = self.vars(a) | self.vars(b);
-                        self.visit_binop(inst, op, new_args);
+                        self.visit_binop(inst, new_args);
                     }
                 }
             } else {

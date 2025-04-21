@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::fmt;
 use std::hash::Hash;
 use std::num::{NonZeroU16, TryFromIntError};
@@ -9,6 +8,7 @@ pub mod io;
 pub mod memoize;
 pub mod reassociate;
 pub mod reorder;
+pub mod simplify;
 
 #[derive(Clone, Copy, Default, Eq, Hash, PartialEq)]
 pub struct Const(u32);
@@ -154,15 +154,6 @@ impl Inst {
         }
     }
 
-    pub fn is_unop(&self, expected: UnOp) -> Option<InstIdx> {
-        if let &Inst::UnOp { op, arg } = self {
-            if op == expected {
-                return Some(arg);
-            }
-        }
-        None
-    }
-
     pub fn is_binop_mut(&mut self, expected: BinOp) -> Option<&mut [InstIdx; 2]> {
         if let Inst::BinOp { op, args } = self {
             if *op == expected {
@@ -241,65 +232,65 @@ impl BitOr for VarSet {
     }
 }
 
+pub trait InstSink {
+    type Idx: Copy + Eq + Hash + Ord;
+    type Output;
+    fn push_const(&mut self, value: Const) -> Self::Idx;
+    fn push_var(&mut self, var: Var) -> Self::Idx;
+    fn push_unop(&mut self, op: UnOp, arg: Self::Idx) -> Self::Idx;
+    fn push_binop(&mut self, op: BinOp, args: [Self::Idx; 2]) -> Self::Idx;
+    fn push_load(&mut self, vars: VarSet, loc: Location) -> Self::Idx;
+    fn finish(self, last: Self::Idx) -> Self::Output;
+}
+
 #[derive(Default)]
 pub struct Insts {
     pub pool: Vec<Inst>,
     pub vars: Vec<VarSet>,
-    gvn: HashMap<Inst, InstIdx>,
+}
+
+impl InstSink for Insts {
+    type Idx = InstIdx;
+    type Output = Self;
+
+    fn push_const(&mut self, value: Const) -> Self::Idx {
+        self.push(Inst::Const { value })
+    }
+
+    fn push_var(&mut self, var: Var) -> Self::Idx {
+        self.push(Inst::Var { var })
+    }
+
+    fn push_unop(&mut self, op: UnOp, arg: Self::Idx) -> Self::Idx {
+        self.push(Inst::UnOp { op, arg })
+    }
+
+    fn push_binop(&mut self, op: BinOp, args: [Self::Idx; 2]) -> Self::Idx {
+        self.push(Inst::BinOp { op, args })
+    }
+
+    fn push_load(&mut self, vars: VarSet, loc: Location) -> Self::Idx {
+        self.push(Inst::Load { vars, loc })
+    }
+
+    fn finish(self, _last: Self::Idx) -> Self::Output {
+        self
+    }
 }
 
 impl Insts {
-    pub fn push(&mut self, mut inst: Inst) -> InstIdx {
-        match &mut inst {
-            Inst::UnOp {
-                op: UnOp::Square,
-                arg,
-            } => {
-                // Squaring -x is the same as squaring x.
-                if let Some(pos) = self.pool[arg.idx()].is_unop(UnOp::Neg) {
-                    *arg = pos;
-                }
-            }
+    fn push(&mut self, inst: Inst) -> InstIdx {
+        let vars = |idx: InstIdx| self.vars[idx.idx()];
+        self.vars.push(match inst {
+            Inst::Const { .. } => VarSet::default(),
+            Inst::Var { var } => var.into(),
+            Inst::UnOp { arg, .. } => vars(arg),
+            Inst::BinOp { args: [a, b], .. } => vars(a) | vars(b),
+            Inst::Load { vars, .. } => vars,
+        });
 
-            Inst::BinOp { op, args } => {
-                match op {
-                    // Sort arguments to commutative binary operators so GVN is more effective.
-                    BinOp::Add | BinOp::Mul | BinOp::Min | BinOp::Max => args.sort_unstable(),
-
-                    // Subtraction is not commutative, but if we previously subtracted the
-                    // arguments in the opposite order then we can just negate that previous
-                    // result.
-                    BinOp::Sub => {
-                        let [a, b] = *args;
-                        let reversed = Inst::BinOp {
-                            op: BinOp::Sub,
-                            args: [b, a],
-                        };
-                        if let Some(&idx) = self.gvn.get(&reversed) {
-                            inst = Inst::UnOp {
-                                op: UnOp::Neg,
-                                arg: idx,
-                            };
-                        }
-                    }
-                }
-            }
-            _ => (),
-        }
-
-        *self.gvn.entry(inst).or_insert_with_key(|inst| {
-            let vars = |idx: InstIdx| self.vars[idx.idx()];
-            self.vars.push(match *inst {
-                Inst::Const { .. } => VarSet::default(),
-                Inst::Var { var } => var.into(),
-                Inst::UnOp { arg, .. } => vars(arg),
-                Inst::BinOp { args: [a, b], .. } => vars(a) | vars(b),
-                Inst::Load { vars, .. } => vars,
-            });
-
-            let idx = self.pool.len().try_into().unwrap();
-            self.pool.push(inst.clone());
-            idx
-        })
+        let idx = self.pool.len().try_into().unwrap();
+        self.pool.push(inst.clone());
+        idx
     }
 }

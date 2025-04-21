@@ -4,7 +4,7 @@ use std::num::ParseFloatError;
 use thiserror::Error;
 
 use super::memoize::Memoized;
-use super::{BinOp, Const, Inst, InstIdx, Insts, UnOp, Var};
+use super::{BinOp, Const, Inst, InstSink, UnOp, Var};
 
 pub fn write(mut f: impl io::Write, insts: impl IntoIterator<Item = Inst>) -> io::Result<()> {
     for (idx, inst) in insts.into_iter().enumerate() {
@@ -45,6 +45,8 @@ pub fn write_memoized(mut f: impl io::Write, memoized: &Memoized) -> io::Result<
 pub enum Error {
     #[error("read failed")]
     IO(#[from] io::Error),
+    #[error("no input")]
+    Empty,
     #[error("invalid constant")]
     InvalidConst(#[from] ParseFloatError),
     #[error("missing token")]
@@ -61,9 +63,9 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-pub fn read(f: impl io::BufRead) -> Result<Insts> {
-    let mut insts = Insts::default();
+pub fn read<S: InstSink>(f: impl io::BufRead, mut sink: S) -> Result<S::Output> {
     let mut names = HashMap::new();
+    let mut last = None;
 
     for line in f.lines() {
         let line = line?;
@@ -77,21 +79,21 @@ pub fn read(f: impl io::BufRead) -> Result<Insts> {
 
         let Ok(out) = tokens.next() else { continue };
 
-        let inst = match tokens.next()? {
-            "const" => Const::new(tokens.next()?.parse()?).into(),
-            "var-x" => Var::X.into(),
-            "var-y" => Var::Y.into(),
-            "var-z" => Var::Z.into(),
+        let idx = match tokens.next()? {
+            "const" => sink.push_const(Const::new(tokens.next()?.parse()?)),
+            "var-x" => sink.push_var(Var::X),
+            "var-y" => sink.push_var(Var::Y),
+            "var-z" => sink.push_var(Var::Z),
 
-            "neg" => tokens.unop(UnOp::Neg)?,
-            "square" => tokens.unop(UnOp::Square)?,
-            "sqrt" => tokens.unop(UnOp::Sqrt)?,
+            "neg" => tokens.unop(UnOp::Neg, &mut sink)?,
+            "square" => tokens.unop(UnOp::Square, &mut sink)?,
+            "sqrt" => tokens.unop(UnOp::Sqrt, &mut sink)?,
 
-            "add" => tokens.binop(BinOp::Add)?,
-            "sub" => tokens.binop(BinOp::Sub)?,
-            "mul" => tokens.binop(BinOp::Mul)?,
-            "min" => tokens.binop(BinOp::Min)?,
-            "max" => tokens.binop(BinOp::Max)?,
+            "add" => tokens.binop(BinOp::Add, &mut sink)?,
+            "sub" => tokens.binop(BinOp::Sub, &mut sink)?,
+            "mul" => tokens.binop(BinOp::Mul, &mut sink)?,
+            "min" => tokens.binop(BinOp::Min, &mut sink)?,
+            "max" => tokens.binop(BinOp::Max, &mut sink)?,
 
             op => return Err(Error::UnknownOp(op.to_string())),
         };
@@ -100,28 +102,29 @@ pub fn read(f: impl io::BufRead) -> Result<Insts> {
 
         match names.entry(out.to_string()) {
             Entry::Vacant(e) => {
-                e.insert(insts.push(inst));
+                e.insert(idx);
             }
             Entry::Occupied(e) => {
                 return Err(Error::RedefinedName(e.remove_entry().0));
             }
         }
+        last = Some(idx);
     }
 
-    Ok(insts)
+    Ok(sink.finish(last.ok_or(Error::Empty)?))
 }
 
-struct Tokens<'a, I> {
-    names: &'a HashMap<String, InstIdx>,
+struct Tokens<'a, I, S: InstSink> {
+    names: &'a HashMap<String, S::Idx>,
     tokens: I,
 }
 
-impl<'a, I: Iterator<Item = &'a str>> Tokens<'a, I> {
+impl<'a, I: Iterator<Item = &'a str>, S: InstSink> Tokens<'a, I, S> {
     fn next(&mut self) -> Result<&'a str> {
         self.tokens.next().ok_or(Error::MissingToken)
     }
 
-    fn arg(&mut self) -> Result<InstIdx> {
+    fn arg(&mut self) -> Result<S::Idx> {
         let name = self.next()?;
         self.names
             .get(name)
@@ -129,18 +132,12 @@ impl<'a, I: Iterator<Item = &'a str>> Tokens<'a, I> {
             .copied()
     }
 
-    fn unop(&mut self, op: UnOp) -> Result<Inst> {
-        Ok(Inst::UnOp {
-            op,
-            arg: self.arg()?,
-        })
+    fn unop(&mut self, op: UnOp, sink: &mut S) -> Result<S::Idx> {
+        Ok(sink.push_unop(op, self.arg()?))
     }
 
-    fn binop(&mut self, op: BinOp) -> Result<Inst> {
-        Ok(Inst::BinOp {
-            op,
-            args: [self.arg()?, self.arg()?],
-        })
+    fn binop(&mut self, op: BinOp, sink: &mut S) -> Result<S::Idx> {
+        Ok(sink.push_binop(op, [self.arg()?, self.arg()?]))
     }
 
     fn empty(mut self) -> Result<()> {

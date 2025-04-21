@@ -6,7 +6,7 @@ fn main() -> ir::io::Result<()> {
     } else {
         512
     };
-    let insts = ir::io::read(std::io::stdin().lock())?;
+    let insts = ir::io::read(std::io::stdin().lock(), ir::Insts::default())?;
     ir::interp::interp(std::io::stdout().lock(), &insts, size)?;
     Ok(())
 }

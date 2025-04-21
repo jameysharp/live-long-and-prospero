@@ -4,7 +4,6 @@ pub fn reorder(insts: &mut Insts) {
     let Some(root) = insts.pool.len().checked_sub(1) else {
         return;
     };
-    insts.gvn.clear();
 
     let mut placed = 0;
     let mut remap = vec![None; insts.pool.len()];
