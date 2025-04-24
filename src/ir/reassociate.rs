@@ -1,222 +1,223 @@
 use std::mem::swap;
 use std::num::Saturating;
 
-use super::{BinOp, Inst, InstIdx, Insts, VarSet};
+use super::{BinOp, Inst, InstSink, UnOp, VarSet};
 
-pub fn reassociate(insts: &mut Insts) {
-    // for every commutative binary operator (op a b) we'll establish this invariant:
-    // vars(a) == vars(b) implies one of these:
-    //   b does not use the same operator
-    //   a or b has multiple uses
-    let mut state = State {
-        vars: &mut insts.vars,
-        uses: vec![Saturating(0u8); insts.pool.len()],
-        stack: Vec::new(),
-    };
+pub fn reassociate<S: InstSink>(insts: &[Inst], mut sink: S) -> S::Output {
+    let uses = count_uses(insts);
+    let mut data: Vec<InstData<S::Idx>> = Vec::with_capacity(insts.len());
 
-    if let Some(last) = state.uses.last_mut() {
+    for (inst, uses) in insts.iter().zip(uses) {
+        let mut new = match *inst {
+            Inst::Const { value } => InstData::new(VarSet::default(), sink.push_const(value)),
+            Inst::Var { var } => InstData::new(var.into(), sink.push_var(var)),
+            Inst::Load { vars, loc } => InstData::new(vars, sink.push_load(vars, loc)),
+            Inst::UnOp { op, arg } => {
+                let mut arg = data[arg.idx()].clone();
+                if op == UnOp::Neg {
+                    arg.negate();
+                    arg
+                } else {
+                    let (vars, idx) = arg.flush_neg(&mut sink);
+                    InstData::new(vars, sink.push_unop(op, idx))
+                }
+            }
+            Inst::BinOp { mut op, args } => {
+                let [mut a, mut b] = args.map(|arg| data[arg.idx()].clone());
+                if op == BinOp::Sub {
+                    op = BinOp::Add;
+                    b.negate();
+                }
+                if a.op != Some(op) {
+                    a.flush(&mut sink);
+                }
+                if b.op != Some(op) {
+                    b.flush(&mut sink);
+                }
+                for (subtree_a, subtree_b) in a.subtrees.iter_mut().zip(&b.subtrees) {
+                    subtree_a.merge(subtree_b, op, &mut sink);
+                }
+                a.op = Some(op);
+                a
+            }
+        };
+        if uses.0 > 1 {
+            new.flush(&mut sink);
+        }
+        data.push(new);
+    }
+
+    let last = data.pop().unwrap();
+    let (_vars, last) = last.flush_neg(&mut sink);
+    sink.finish(last)
+}
+
+#[derive(Clone, Debug)]
+struct InstData<I> {
+    op: Option<BinOp>,
+    subtrees: [Subtree<I>; VarSet::ALL.idx() + 1],
+}
+
+impl<I: Copy> InstData<I> {
+    fn new(vars: VarSet, idx: I) -> Self {
+        let mut result = InstData {
+            op: None,
+            subtrees: Default::default(),
+        };
+        result.subtrees[vars.idx()].pos = Some(idx);
+        result
+    }
+
+    fn flush(&mut self, sink: &mut impl InstSink<Idx = I>) {
+        if let Some(op) = self.op {
+            let mut result = Subtree::default();
+            let mut result_vars = VarSet::default();
+            // The results of this pass are very sensitive to the details of
+            // this loop. There are three key choices here:
+            // - Largest VarSet to smallest (with .rev()) or vice versa?
+            // - Flush each subtree before merging, or not?
+            // - Flush immediately after merging, or once at the end?
+            // I don't have strong justification for any of these choices,
+            // but empirically, this combination is better than all the
+            // alternatives, both at minimizing the number of outputs needed
+            // from each memoized function, and at moving more instructions
+            // out of the final function that runs for each pixel and into the
+            // memoized functions that run much less often.
+            for (idx, subtree) in self.subtrees.iter_mut().enumerate().rev() {
+                if !subtree.is_empty() {
+                    subtree.flush(op, sink);
+                    result.merge(subtree, op, sink);
+                    result.flush(op, sink);
+                    result_vars = result_vars | VarSet(idx.try_into().unwrap());
+                    *subtree = Subtree::default();
+                }
+            }
+            debug_assert!(!result.is_empty());
+            self.subtrees[result_vars.idx()] = result;
+            self.op = None;
+        }
+    }
+
+    fn flush_neg(mut self, sink: &mut impl InstSink<Idx = I>) -> (VarSet, I) {
+        self.flush(sink);
+        let mut it = self.subtrees.iter().enumerate();
+        let (vars, subtree) = it.find(|(_vars, subtree)| !subtree.is_empty()).unwrap();
+        debug_assert_ne!(subtree.pos.is_some(), subtree.neg.is_some());
+        debug_assert!(it.all(|(_vars, subtree)| subtree.is_empty()));
+
+        let idx = match (subtree.pos, subtree.neg) {
+            (Some(pos), None) => pos,
+            (None, Some(neg)) => sink.push_unop(UnOp::Neg, neg),
+            _ => unreachable!(),
+        };
+        (VarSet(vars.try_into().unwrap()), idx)
+    }
+
+    fn negate(&mut self) {
+        for vars in self.subtrees.iter_mut() {
+            vars.negate();
+        }
+
+        match self.op {
+            Some(BinOp::Min) => self.op = Some(BinOp::Max),
+            Some(BinOp::Max) => self.op = Some(BinOp::Min),
+            _ => {}
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct Subtree<I> {
+    pos: Option<I>,
+    neg: Option<I>,
+}
+
+impl<I> Default for Subtree<I> {
+    fn default() -> Self {
+        Subtree {
+            pos: None,
+            neg: None,
+        }
+    }
+}
+
+impl<I: Copy> Subtree<I> {
+    fn is_empty(&self) -> bool {
+        self.pos.is_none() && self.neg.is_none()
+    }
+
+    fn flush(&mut self, op: BinOp, sink: &mut impl InstSink<Idx = I>) {
+        if let (Some(pos), Some(neg)) = (self.pos, self.neg) {
+            let pos = match op {
+                BinOp::Sub | BinOp::Mul => unreachable!(),
+                BinOp::Add => sink.push_binop(BinOp::Sub, [pos, neg]),
+                BinOp::Min | BinOp::Max => {
+                    let neg = sink.push_unop(UnOp::Neg, neg);
+                    sink.push_binop(op, [pos, neg])
+                }
+            };
+            self.pos = Some(pos);
+            self.neg = None;
+        }
+    }
+
+    fn negate(&mut self) {
+        swap(&mut self.pos, &mut self.neg);
+    }
+
+    fn merge(&mut self, other: &Self, op: BinOp, sink: &mut impl InstSink<Idx = I>) {
+        match op {
+            BinOp::Sub => unreachable!(),
+            BinOp::Mul => {
+                debug_assert!(self.pos.is_none() || self.neg.is_none());
+                debug_assert!(other.pos.is_none() || other.neg.is_none());
+                let neg = self.neg.is_some() ^ other.neg.is_some();
+                *self = Subtree {
+                    pos: self.pos.or(self.neg),
+                    neg: None,
+                };
+                merge(&mut self.pos, other.pos.or(other.neg), BinOp::Mul, sink);
+                if neg {
+                    self.negate();
+                }
+            }
+            BinOp::Add => {
+                merge(&mut self.pos, other.pos, BinOp::Add, sink);
+                merge(&mut self.neg, other.neg, BinOp::Add, sink);
+            }
+            BinOp::Min => {
+                merge(&mut self.pos, other.pos, BinOp::Min, sink);
+                merge(&mut self.neg, other.neg, BinOp::Max, sink);
+            }
+            BinOp::Max => {
+                merge(&mut self.pos, other.pos, BinOp::Max, sink);
+                merge(&mut self.neg, other.neg, BinOp::Min, sink);
+            }
+        }
+    }
+}
+
+fn merge<S: InstSink>(this: &mut Option<S::Idx>, other: Option<S::Idx>, op: BinOp, sink: &mut S) {
+    if let Some(b) = other {
+        if let Some(a) = *this {
+            *this = Some(sink.push_binop(op, [a, b]));
+        } else {
+            *this = Some(b);
+        }
+    }
+}
+
+fn count_uses(insts: &[Inst]) -> Vec<Saturating<u8>> {
+    let mut uses = vec![Saturating(0u8); insts.len()];
+    if let Some(last) = uses.last_mut() {
         last.0 = 1;
     }
-    for (idx, inst) in insts.pool.iter().enumerate().rev() {
-        if state.uses[idx].0 > 0 {
+    for (idx, inst) in insts.iter().enumerate().rev() {
+        if uses[idx].0 > 0 {
             for &arg in inst.args() {
-                state.uses[arg.idx()] += 1;
+                uses[arg.idx()] += 1;
             }
         }
     }
-
-    for idx in 0..insts.pool.len() {
-        let idx = InstIdx::try_from(idx).unwrap();
-        if let Inst::BinOp { args, .. } = insts.pool[idx.idx()] {
-            state.visit_binop(idx, args);
-            while let Some(indexes) = state.stack.pop() {
-                let mut subtree = insts
-                    .pool
-                    .get_disjoint_mut(indexes.map(InstIdx::idx))
-                    .unwrap();
-                debug_assert_eq!(subtree[0].args(), &indexes[1..]);
-
-                state.rebalance_add_or_sub(&mut subtree);
-                state.rebalance_commutative(subtree);
-            }
-        }
-    }
-}
-
-struct State<'a> {
-    vars: &'a mut [VarSet],
-    uses: Vec<Saturating<u8>>,
-    stack: Vec<[InstIdx; 3]>,
-}
-
-impl State<'_> {
-    fn vars(&self, root: InstIdx) -> VarSet {
-        self.vars[root.idx()]
-    }
-
-    fn can_reuse(&self, root: InstIdx) -> bool {
-        self.uses[root.idx()].0 < 2
-    }
-
-    fn visit_binop(&mut self, root: InstIdx, [a, b]: [InstIdx; 2]) {
-        // if both args are the same, their vars are equal, and we'd blow up
-        // in get_disjoint_mut. can't reassociate that case without duplicating
-        // instructions anyway.
-        if a != b && self.vars(a) == self.vars(b) {
-            self.stack.push([root, a, b]);
-        }
-    }
-
-    fn rebalance_add_or_sub(&mut self, [inst, inst1, inst2]: &mut [&mut Inst; 3]) -> Option<()> {
-        fn add_or_sub(inst: &Inst) -> Option<(bool, [InstIdx; 2])> {
-            match *inst {
-                Inst::BinOp { op, args } => match op {
-                    BinOp::Add => Some((true, args)),
-                    BinOp::Sub => Some((false, args)),
-                    _ => None,
-                },
-                _ => None,
-            }
-        }
-
-        let (sign1, [w, x]) = add_or_sub(inst1)?;
-        let (sign2, [mut y, mut z]) = add_or_sub(inst2)?;
-
-        // if both subterms are addition, use the general case
-        if sign1 && sign2 {
-            return None;
-        }
-
-        let (sign, [a, b]) = add_or_sub(inst)?;
-
-        // if either subterm is a subtraction and has other uses, we can't rewrite
-        // this subtree
-        if !sign1 && !self.can_reuse(a) {
-            return None;
-        }
-        if !sign2 && !self.can_reuse(b) {
-            return None;
-        }
-
-        let (args, args1, args2) = if sign2 {
-            debug_assert!(!sign1);
-            if sign {
-                // (w - x) + (y + z) = (w + (y + z)) - x
-                ([a, x], Some([w, b]), None)
-            } else {
-                // (w - x) - (y + z) = w - (x + (y + z))
-                ([w, a], Some([x, b]), None)
-            }
-        } else {
-            if !sign {
-                // a - (y - z) = a + (z - y)
-                swap(&mut y, &mut z);
-            }
-            if sign1 {
-                // (w + x) + (y - z) = ((w + x) + y) - z
-                ([b, z], None, Some([a, y]))
-            } else {
-                // (w - x) + (y - z) = (w + y) - (x + z)
-                ([a, b], Some([w, y]), Some([x, z]))
-            }
-        };
-
-        // now rewrite subterms, adding them to the stack to revisit if changed
-        let op = BinOp::Add;
-        debug_assert_eq!(args1.is_none(), sign1);
-        if let Some(args) = args1 {
-            self.visit_binop(a, args);
-            **inst1 = Inst::BinOp { op, args };
-        }
-        debug_assert_eq!(args2.is_none(), sign2);
-        if let Some(args) = args2 {
-            self.visit_binop(b, args);
-            **inst2 = Inst::BinOp { op, args };
-        }
-
-        // and rewrite the root
-        let op = BinOp::Sub;
-        **inst = Inst::BinOp { op, args };
-
-        Some(())
-    }
-
-    fn rebalance_commutative(&mut self, [inst, inst1, inst2]: [&mut Inst; 3]) {
-        // rematch the (possibly rewritten) instruction under the new borrow
-        let Inst::BinOp { op, args } = inst else {
-            unreachable!()
-        };
-
-        if !op.is_commutative() {
-            return;
-        }
-
-        let [a, b] = args;
-        if let Some(args2) = inst2.is_binop_mut(*op) {
-            if let Some(args1) = inst1.is_binop_mut(*op) {
-                // don't modify inst1 or inst2 if they have other
-                // uses besides in inst, and at this point we can't
-                // reassociate without modifying both
-                if self.can_reuse(*a) && self.can_reuse(*b) {
-                    self.rebalance(args, args1, args2);
-                }
-            } else {
-                // inst2 matched but inst1 did not, and they have the
-                // same vars, so swap them to establish the invariant
-                swap(a, b);
-            }
-        }
-    }
-
-    fn rebalance(
-        &mut self,
-        args: &mut [InstIdx; 2],
-        args1: &mut [InstIdx; 2],
-        args2: &mut [InstIdx; 2],
-    ) {
-        // we've matched a happy little balanced tree:
-        //   inst(inst1(a1, b1), inst2(a2, b2))
-        // all three instructions use the same operator and, inductively, inst1
-        // and inst2 already satisfy our invariant.
-
-        let [inst1, inst2] = *args;
-        let [a1, b1] = *args1;
-        let [a2, b2] = *args2;
-        let leaves = [a1, a2, b1, b2].map(|idx| (self.vars(idx), idx));
-
-        let mut insts = [(None, args), (Some(inst1), args1), (Some(inst2), args2)]
-            .into_iter()
-            .rev();
-        let mut merge = |group: &mut Option<InstIdx>, new| {
-            if let Some(old) = *group {
-                let (inst, args) = insts.next().unwrap();
-                let new_args = [old, new];
-                *group = inst;
-                if new_args != *args {
-                    *args = new_args;
-                    if let Some(inst) = inst {
-                        let [a, b] = new_args;
-                        self.vars[inst.idx()] = self.vars(a) | self.vars(b);
-                        self.visit_binop(inst, new_args);
-                    }
-                }
-            } else {
-                *group = Some(new);
-            }
-        };
-
-        let mut groups = [None; VarSet::ALL.idx() + 1];
-        for (vars, idx) in leaves {
-            merge(&mut groups[vars.idx()], idx);
-        }
-
-        let mut last = None;
-        for group in groups.into_iter().rev() {
-            if let Some(group) = group {
-                merge(&mut last, group);
-            }
-        }
-        debug_assert_eq!(last, None);
-        debug_assert_eq!(insts.next(), None);
-    }
+    uses
 }
