@@ -246,7 +246,6 @@ pub trait InstSink {
 #[derive(Default)]
 pub struct Insts {
     pub pool: Vec<Inst>,
-    pub vars: Vec<VarSet>,
 }
 
 impl InstSink for Insts {
@@ -280,15 +279,6 @@ impl InstSink for Insts {
 
 impl Insts {
     fn push(&mut self, inst: Inst) -> InstIdx {
-        let vars = |idx: InstIdx| self.vars[idx.idx()];
-        self.vars.push(match inst {
-            Inst::Const { .. } => VarSet::default(),
-            Inst::Var { var } => var.into(),
-            Inst::UnOp { arg, .. } => vars(arg),
-            Inst::BinOp { args: [a, b], .. } => vars(a) | vars(b),
-            Inst::Load { vars, .. } => vars,
-        });
-
         let idx = self.pool.len().try_into().unwrap();
         self.pool.push(inst.clone());
         idx
