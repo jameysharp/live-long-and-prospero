@@ -1,6 +1,7 @@
 use std::fmt;
 use std::io;
 
+use crate::ir::memoize::MemoizedFunc;
 use crate::ir::{BinOp, Location, UnOp, VarSet};
 
 use super::{AsmInst, MemorySpace, Register};
@@ -9,11 +10,12 @@ pub const STRIDE: u8 = 4;
 
 pub fn write(
     mut f: impl io::Write,
-    insts: impl Iterator<Item = AsmInst>,
-    stack_slots: Location,
+    func: &MemoizedFunc,
     vectors: impl IntoIterator<Item = VarSet>,
 ) -> io::Result<()> {
     // requires AVX for v*ps three-operand instructions
+    let (insts, stack_slots) = super::regalloc::alloc(&func.insts, func.vars, &func.outputs);
+
     let vectors = vectors.into_iter().fold(0, |set, vars| {
         set | (1 << MemorySpace::from(vars).idx()) | 1
     });
@@ -30,7 +32,7 @@ pub fn write(
     }
     writeln!(f, "xorps {0},{0}", zero_reg)?;
 
-    for inst in insts {
+    for inst in insts.into_iter().rev() {
         match inst {
             AsmInst::Const { .. } => todo!(),
             AsmInst::Var { .. } => todo!(),

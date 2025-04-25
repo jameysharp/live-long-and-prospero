@@ -33,14 +33,7 @@ fn main() -> ir::io::Result<()> {
             writeln!(out, ".p2align 4")?;
             writeln!(out, ".globl {:?}", func.vars)?;
             writeln!(out, "{:?}:", func.vars)?;
-            let (insts, stack_slots) =
-                codegen::regalloc::alloc(&func.insts, func.vars, &func.outputs);
-            codegen::x86::write(
-                &mut out,
-                insts.into_iter().rev(),
-                stack_slots,
-                [func.vars, ir::Var::X.into()],
-            )?;
+            codegen::x86::write(&mut out, func, [func.vars, ir::Var::X.into()])?;
         }
     }
 
