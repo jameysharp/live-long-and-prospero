@@ -41,13 +41,10 @@ pub fn write(mut out: impl io::Write, memoized: &Memoized) -> io::Result<()> {
     })
 }
 
-fn write_func(
-    mut f: impl io::Write,
+fn emit(
     func: &MemoizedFunc,
     vectors: impl IntoIterator<Item = VarSet>,
-) -> io::Result<()> {
-    // requires AVX for v*ps three-operand instructions
-
+) -> (Xmm, X86Target, Location) {
     let mut allocs: Vec<Allocation> = func
         .insts
         .iter()
@@ -66,7 +63,8 @@ fn write_func(
         }
     }
 
-    let mut regs = Registers::new(allocs, 15, Vec::new());
+    let zero_reg = Xmm(15.try_into().unwrap());
+    let mut regs = Registers::new(allocs, 15, X86Target::new(vectors));
 
     for (idx, inst) in func.insts.iter().enumerate().rev() {
         let idx = idx.try_into().unwrap();
@@ -75,30 +73,56 @@ fn write_func(
                 unimplemented!("{inst:?} not allowed in memoized functions")
             }
             Inst::UnOp { op, arg } => {
-                let reg = regs.get_output_reg(idx);
-                let arg = regs.get_reg(arg);
-                regs.target.push(AsmInst::UnOp { reg, op, arg });
+                let dst = regs.get_output_reg(idx).into();
+                let arg: Xmm = regs.get_reg(arg).into();
+                let inst = match op {
+                    UnOp::Neg => X86Inst::XmmRmR {
+                        op: BinOp::Sub,
+                        src1: zero_reg,
+                        src2: arg.into(),
+                        dst,
+                    },
+                    UnOp::Square => X86Inst::XmmRmR {
+                        op: BinOp::Mul,
+                        src1: arg,
+                        src2: arg.into(),
+                        dst,
+                    },
+                    UnOp::Sqrt => X86Inst::XmmUnaryRmRVex {
+                        op: XmmUnaryRmRVexOpcode::Vsqrtps,
+                        src: arg.into(),
+                        dst,
+                    },
+                };
+                regs.target.insts.push(inst);
             }
             Inst::BinOp { op, args } => {
-                let reg = regs.get_output_reg(idx);
-                let args = args.map(|arg| regs.get_reg(arg));
-                regs.target.push(AsmInst::BinOp { reg, op, args });
+                let dst = regs.get_output_reg(idx).into();
+                let [src1, src2] = args.map(|arg| regs.get_reg(arg).into());
+                regs.target.insts.push(X86Inst::XmmRmR {
+                    op,
+                    src1,
+                    src2: src2.into(),
+                    dst,
+                });
             }
-            Inst::Load { vars, loc } => regs.emit_load(idx, vars, loc),
+            Inst::Load { vars, loc } => regs.emit_load(idx, vars.into(), loc),
         }
     }
 
-    let (insts, stack_slots) = regs.finish();
+    let (target, stack_slots) = regs.finish();
+    (zero_reg, target, stack_slots)
+}
 
-    let vectors = vectors.into_iter().fold(0, |set, vars| {
-        set | (1 << MemorySpace::from(vars).idx()) | 1
-    });
-    let stride = if vectors != 0 { STRIDE } else { 1 };
-
-    let zero_reg = Xmm(15.try_into().unwrap());
+fn write_func(
+    mut f: impl io::Write,
+    func: &MemoizedFunc,
+    vectors: impl IntoIterator<Item = VarSet>,
+) -> io::Result<()> {
+    let (zero_reg, target, stack_slots) = emit(func, vectors);
 
     // prologue
-    let frame_size = usize::from(stack_slots) * usize::from(stride) * 4;
+    let frame_size = usize::from(stack_slots) * usize::from(target.stride) * 4;
     if frame_size > 0 {
         writeln!(f, "pushq %rbp")?;
         writeln!(f, "movq %rsp,%rbp")?;
@@ -106,50 +130,8 @@ fn write_func(
     }
     writeln!(f, "xorps {0},{0}", zero_reg)?;
 
-    for inst in insts.into_iter().rev() {
-        match inst {
-            AsmInst::UnOp { reg, op, arg } => match op {
-                UnOp::Neg => writeln!(f, "vsubps {},{},{}", Xmm(arg), zero_reg, Xmm(reg))?,
-                UnOp::Square => writeln!(f, "vmulps {},{},{}", Xmm(arg), Xmm(arg), Xmm(reg))?,
-                UnOp::Sqrt => writeln!(f, "sqrtps {},{}", Xmm(arg), Xmm(reg))?,
-            },
-            AsmInst::BinOp {
-                reg,
-                op,
-                args: [a, b],
-            } => {
-                let opcode = match op {
-                    BinOp::Add => "vaddps",
-                    BinOp::Sub => "vsubps",
-                    BinOp::Mul => "vmulps",
-                    BinOp::Min => "vminps",
-                    BinOp::Max => "vmaxps",
-                };
-                writeln!(f, "{opcode} {},{},{}", Xmm(b), Xmm(a), Xmm(reg))?;
-            }
-            AsmInst::Load { reg, mem, loc } => {
-                let opcode = if vectors & (1 << mem.idx()) != 0 {
-                    "movaps"
-                } else {
-                    "vbroadcastss"
-                };
-                let stride = if mem == VarSet::default().into() {
-                    // constants are always scalars
-                    1
-                } else {
-                    stride
-                };
-                writeln!(f, "{opcode} {},{}", Address(mem, loc, stride), Xmm(reg))?;
-            }
-            AsmInst::Store { reg, mem, loc } => {
-                let opcode = if vectors & (1 << mem.idx()) != 0 {
-                    "movaps"
-                } else {
-                    "movd"
-                };
-                writeln!(f, "{opcode} {},{}", Xmm(reg), Address(mem, loc, stride))?;
-            }
-        }
+    for inst in target.insts.into_iter().rev() {
+        writeln!(f, "{inst}")?;
     }
 
     if frame_size > 0 {
@@ -159,40 +141,153 @@ fn write_func(
     writeln!(f, "ret")
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum AsmInst {
-    UnOp {
-        reg: Register,
-        op: UnOp,
-        arg: Register,
-    },
-    BinOp {
-        reg: Register,
-        op: BinOp,
-        args: [Register; 2],
-    },
-    Load {
-        reg: Register,
-        mem: MemorySpace,
-        loc: Location,
-    },
-    Store {
-        reg: Register,
-        mem: MemorySpace,
-        loc: Location,
-    },
+struct X86Target {
+    vectors: u16,
+    stride: u8,
+    insts: Vec<X86Inst>,
 }
 
-impl Target for Vec<AsmInst> {
+impl X86Target {
+    fn new(vectors: impl IntoIterator<Item = VarSet>) -> X86Target {
+        let vectors = vectors.into_iter().fold(0, |set, vars| {
+            set | (1 << MemorySpace::from(vars).idx()) | 1
+        });
+        X86Target {
+            vectors,
+            stride: if vectors != 0 { STRIDE } else { 1 },
+            insts: Vec::new(),
+        }
+    }
+}
+
+impl Target for X86Target {
     fn emit_load(&mut self, reg: Register, mem: MemorySpace, loc: Location) {
-        self.push(AsmInst::Load { reg, mem, loc });
+        let op = if self.vectors & (1 << mem.idx()) != 0 {
+            XmmUnaryRmRVexOpcode::Vmovaps
+        } else {
+            XmmUnaryRmRVexOpcode::Vbroadcastss
+        };
+        let stride = if mem == VarSet::default().into() {
+            // constants are always scalars
+            1
+        } else {
+            self.stride
+        };
+        let dst = reg.into();
+        let src = Address(mem, loc, stride).into();
+        self.insts.push(X86Inst::XmmUnaryRmRVex { op, src, dst });
     }
 
     fn emit_store(&mut self, reg: Register, mem: MemorySpace, loc: Location) {
-        self.push(AsmInst::Store { reg, mem, loc });
+        let op = if self.vectors & (1 << mem.idx()) != 0 {
+            XmmMovRMVexOpcode::Vmovaps
+        } else {
+            XmmMovRMVexOpcode::Vmovd
+        };
+        let src = reg.into();
+        let dst = Address(mem, loc, self.stride).into();
+        self.insts.push(X86Inst::XmmMovRMVex { op, src, dst });
     }
 }
 
+#[derive(Debug)]
+enum X86Inst {
+    XmmRmR {
+        op: BinOp,
+        src1: Xmm,
+        src2: XmmMem,
+        dst: Xmm,
+    },
+    XmmUnaryRmRVex {
+        op: XmmUnaryRmRVexOpcode,
+        src: XmmMem,
+        dst: Xmm,
+    },
+    XmmMovRMVex {
+        op: XmmMovRMVexOpcode,
+        src: Xmm,
+        dst: XmmMem,
+    },
+}
+
+impl fmt::Display for X86Inst {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            X86Inst::XmmRmR {
+                op,
+                src1,
+                src2,
+                dst,
+            } => {
+                let opcode = match op {
+                    BinOp::Add => "vaddps",
+                    BinOp::Sub => "vsubps",
+                    BinOp::Mul => "vmulps",
+                    BinOp::Min => "vminps",
+                    BinOp::Max => "vmaxps",
+                };
+                write!(f, "{opcode} {src2},{src1},{dst}")
+            }
+            X86Inst::XmmUnaryRmRVex { op, src, dst } => {
+                let opcode = match op {
+                    XmmUnaryRmRVexOpcode::Vmovaps => "vmovaps",
+                    XmmUnaryRmRVexOpcode::Vbroadcastss => "vbroadcastss",
+                    XmmUnaryRmRVexOpcode::Vsqrtps => "vsqrtps",
+                };
+                write!(f, "{opcode} {src},{dst}")
+            }
+            X86Inst::XmmMovRMVex { op, src, dst } => {
+                let opcode = match op {
+                    XmmMovRMVexOpcode::Vmovaps => "vmovaps",
+                    XmmMovRMVexOpcode::Vmovd => "vmovd",
+                };
+                write!(f, "{opcode} {src},{dst}")
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum XmmUnaryRmRVexOpcode {
+    Vbroadcastss,
+    Vmovaps,
+    Vsqrtps,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum XmmMovRMVexOpcode {
+    Vmovaps,
+    Vmovd,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum XmmMem {
+    Xmm(Xmm),
+    Mem(Address),
+}
+
+impl fmt::Display for XmmMem {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            XmmMem::Xmm(xmm) => xmm.fmt(f),
+            XmmMem::Mem(address) => address.fmt(f),
+        }
+    }
+}
+
+impl From<Xmm> for XmmMem {
+    fn from(value: Xmm) -> Self {
+        XmmMem::Xmm(value)
+    }
+}
+
+impl From<Address> for XmmMem {
+    fn from(value: Address) -> Self {
+        XmmMem::Mem(value)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
 struct Xmm(Register);
 
 impl fmt::Display for Xmm {
@@ -201,6 +296,13 @@ impl fmt::Display for Xmm {
     }
 }
 
+impl From<Register> for Xmm {
+    fn from(value: Register) -> Self {
+        Xmm(value)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
 struct Address(MemorySpace, Location, u8);
 
 impl fmt::Display for Address {

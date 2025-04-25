@@ -1,6 +1,6 @@
 use std::mem::replace;
 
-use crate::ir::{InstIdx, Location, VarSet};
+use crate::ir::{InstIdx, Location};
 
 use super::{MemorySpace, Register};
 
@@ -129,9 +129,8 @@ impl<T: Target> Registers<T> {
     // that uses this value and now, another instruction needed a register and
     // stole the one we'd have used. But in that case, the load is emitted at
     // that time, so we have nothing to do now.
-    pub fn emit_load(&mut self, idx: InstIdx, vars: VarSet, loc: Location) {
+    pub fn emit_load(&mut self, idx: InstIdx, mem: MemorySpace, loc: Location) {
         if let Some(reg) = self.allocs[idx.idx()].reg {
-            let mem = vars.into();
             self.target.emit_load(reg, mem, loc);
             self.free_reg(reg);
         }
