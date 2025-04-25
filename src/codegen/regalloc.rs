@@ -32,21 +32,29 @@ pub fn alloc(
         }
     }
 
-    let mut regs = Registers::new(allocs, 15);
+    let mut regs = Registers::new(allocs, 15, Vec::new());
 
     for (idx, inst) in insts.iter().enumerate().rev() {
         let idx = idx.try_into().unwrap();
         match *inst {
-            Inst::Const { value } => regs.emit(idx, |reg, _| AsmInst::Const { reg, value }),
-            Inst::Var { var } => regs.emit(idx, |reg, _| AsmInst::Var { reg, var }),
-            Inst::UnOp { op, arg } => regs.emit(idx, |reg, regs| {
+            Inst::Const { value } => {
+                let reg = regs.get_output_reg(idx);
+                regs.target.push(AsmInst::Const { reg, value });
+            }
+            Inst::Var { var } => {
+                let reg = regs.get_output_reg(idx);
+                regs.target.push(AsmInst::Var { reg, var });
+            }
+            Inst::UnOp { op, arg } => {
+                let reg = regs.get_output_reg(idx);
                 let arg = regs.get_reg(arg);
-                AsmInst::UnOp { reg, op, arg }
-            }),
-            Inst::BinOp { op, args } => regs.emit(idx, |reg, regs| {
+                regs.target.push(AsmInst::UnOp { reg, op, arg });
+            }
+            Inst::BinOp { op, args } => {
+                let reg = regs.get_output_reg(idx);
                 let args = args.map(|arg| regs.get_reg(arg));
-                AsmInst::BinOp { reg, op, args }
-            }),
+                regs.target.push(AsmInst::BinOp { reg, op, args });
+            }
 
             // A load instruction is special. We never store its value, because
             // it's already in memory. And if it doesn't have a register
@@ -60,14 +68,14 @@ pub fn alloc(
             Inst::Load { vars, loc } => {
                 if let Some(reg) = regs.allocs[idx.idx()].reg {
                     let mem = vars.into();
-                    regs.output.push(AsmInst::Load { reg, mem, loc });
+                    regs.target.push(AsmInst::Load { reg, mem, loc });
                     regs.free_reg(reg);
                 }
             }
         }
     }
 
-    (regs.output, regs.stack_slots)
+    (regs.target, regs.stack_slots)
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -85,52 +93,57 @@ impl Allocation {
     }
 }
 
-struct Registers {
+trait Target {
+    fn emit_load(&mut self, reg: Register, mem: MemorySpace, loc: Location);
+    fn emit_store(&mut self, reg: Register, mem: MemorySpace, loc: Location);
+}
+
+impl Target for Vec<AsmInst> {
+    fn emit_load(&mut self, reg: Register, mem: MemorySpace, loc: Location) {
+        self.push(AsmInst::Load { reg, mem, loc });
+    }
+
+    fn emit_store(&mut self, reg: Register, mem: MemorySpace, loc: Location) {
+        self.push(AsmInst::Store { reg, mem, loc });
+    }
+}
+
+struct Registers<T> {
     allocs: Vec<Allocation>,
     recent: Lru,
     live: Vec<Option<InstIdx>>,
     stack_slots: Location,
     free_slots: Vec<(MemorySpace, Location)>,
-    output: Vec<AsmInst>,
+    target: T,
 }
 
-impl Registers {
-    fn new(allocs: Vec<Allocation>, regs: usize) -> Self {
+impl<T: Target> Registers<T> {
+    fn new(allocs: Vec<Allocation>, regs: usize, target: T) -> Self {
         Registers {
             allocs,
             recent: Lru::new(regs),
             live: vec![None; regs],
             stack_slots: 0,
             free_slots: Vec::new(),
-            output: Vec::new(),
+            target,
         }
-    }
-
-    fn emit(&mut self, idx: InstIdx, inst: impl FnOnce(Register, &mut Registers) -> AsmInst) {
-        let reg = self.get_output_reg(idx);
-        let inst = inst(reg, self);
-        self.emit_common(idx, reg, inst);
     }
 
     fn get_output_reg(&mut self, idx: InstIdx) -> Register {
         let reg = self.get_reg(idx);
         self.free_reg(reg);
-        reg
-    }
-
-    fn emit_common(&mut self, idx: InstIdx, reg: Register, inst: AsmInst) {
         if let Allocation {
             mem: Some(mem),
             loc,
             ..
         } = self.allocs[idx.idx()]
         {
-            self.output.push(AsmInst::Store { reg, mem, loc });
+            self.target.emit_store(reg, mem, loc);
             // Any place we're going to store to, not just stack slots, can be
             // safely used as a spill slot for earlier instructions.
             self.free_slots.push((mem, loc));
         }
-        self.output.push(inst);
+        reg
     }
 
     fn get_reg(&mut self, idx: InstIdx) -> Register {
@@ -168,7 +181,7 @@ impl Registers {
 
             // Some later instruction wants this value in this register, so load
             // it for them.
-            self.output.push(AsmInst::Load { reg, mem, loc });
+            self.target.emit_load(reg, mem, loc);
 
             // Remember that this value is only in memory now.
             *alloc = Allocation {
