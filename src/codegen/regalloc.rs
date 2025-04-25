@@ -1,8 +1,8 @@
 use std::mem::replace;
 
-use crate::ir::{Inst, InstIdx, Location, VarSet};
+use crate::ir::{InstIdx, Location, VarSet};
 
-use super::{AsmInst, MemorySpace, Register};
+use super::{MemorySpace, Register};
 
 // Modeled after https://www.mattkeeter.com/blog/2022-10-04-ssra/, except a
 // value may be both in memory and in a register at the same time. That allows
@@ -10,115 +10,37 @@ use super::{AsmInst, MemorySpace, Register};
 // spill-slots, as well as reducing the number of store instructions and, in my
 // opinion, simplifying the implementation considerably.
 
-pub fn alloc(
-    insts: &[Inst],
-    output_vars: VarSet,
-    outputs: &[Option<InstIdx>],
-) -> (Vec<AsmInst>, Location) {
-    let mut allocs: Vec<Allocation> = insts
-        .iter()
-        .map(|inst| {
-            let mut alloc = Allocation::default();
-            if let Inst::Load { vars, loc } = *inst {
-                alloc.initial_location(vars.into(), loc);
-            }
-            alloc
-        })
-        .collect();
-
-    for (loc, &idx) in outputs.iter().enumerate() {
-        if let Some(idx) = idx {
-            allocs[idx.idx()].initial_location(output_vars.into(), loc.try_into().unwrap());
-        }
-    }
-
-    let mut regs = Registers::new(allocs, 15, Vec::new());
-
-    for (idx, inst) in insts.iter().enumerate().rev() {
-        let idx = idx.try_into().unwrap();
-        match *inst {
-            Inst::Const { value } => {
-                let reg = regs.get_output_reg(idx);
-                regs.target.push(AsmInst::Const { reg, value });
-            }
-            Inst::Var { var } => {
-                let reg = regs.get_output_reg(idx);
-                regs.target.push(AsmInst::Var { reg, var });
-            }
-            Inst::UnOp { op, arg } => {
-                let reg = regs.get_output_reg(idx);
-                let arg = regs.get_reg(arg);
-                regs.target.push(AsmInst::UnOp { reg, op, arg });
-            }
-            Inst::BinOp { op, args } => {
-                let reg = regs.get_output_reg(idx);
-                let args = args.map(|arg| regs.get_reg(arg));
-                regs.target.push(AsmInst::BinOp { reg, op, args });
-            }
-
-            // A load instruction is special. We never store its value, because
-            // it's already in memory. And if it doesn't have a register
-            // assigned to it at this point, that means no instruction needs
-            // the load to happen here, so we can skip it. That could happen
-            // either if the result of the load is never used (unlikely) or if,
-            // sometime between allocating an instruction that uses this value
-            // and now, another instruction needed a register and stole the one
-            // we'd have used. But in that case, the load is emitted at that
-            // time, so we have nothing to do now.
-            Inst::Load { vars, loc } => {
-                if let Some(reg) = regs.allocs[idx.idx()].reg {
-                    let mem = vars.into();
-                    regs.target.push(AsmInst::Load { reg, mem, loc });
-                    regs.free_reg(reg);
-                }
-            }
-        }
-    }
-
-    (regs.target, regs.stack_slots)
-}
-
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-struct Allocation {
+pub struct Allocation {
     reg: Option<Register>,
     mem: Option<MemorySpace>,
     loc: Location,
 }
 
 impl Allocation {
-    fn initial_location(&mut self, mem: MemorySpace, loc: Location) {
+    pub fn initial_location(&mut self, mem: MemorySpace, loc: Location) {
         assert_eq!(self, &Allocation::default());
         self.mem = Some(mem);
         self.loc = loc;
     }
 }
 
-trait Target {
+pub trait Target {
     fn emit_load(&mut self, reg: Register, mem: MemorySpace, loc: Location);
     fn emit_store(&mut self, reg: Register, mem: MemorySpace, loc: Location);
 }
 
-impl Target for Vec<AsmInst> {
-    fn emit_load(&mut self, reg: Register, mem: MemorySpace, loc: Location) {
-        self.push(AsmInst::Load { reg, mem, loc });
-    }
-
-    fn emit_store(&mut self, reg: Register, mem: MemorySpace, loc: Location) {
-        self.push(AsmInst::Store { reg, mem, loc });
-    }
-}
-
-struct Registers<T> {
+pub struct Registers<T> {
     allocs: Vec<Allocation>,
     recent: Lru,
     live: Vec<Option<InstIdx>>,
     stack_slots: Location,
     free_slots: Vec<(MemorySpace, Location)>,
-    target: T,
+    pub target: T,
 }
 
 impl<T: Target> Registers<T> {
-    fn new(allocs: Vec<Allocation>, regs: usize, target: T) -> Self {
+    pub fn new(allocs: Vec<Allocation>, regs: usize, target: T) -> Self {
         Registers {
             allocs,
             recent: Lru::new(regs),
@@ -129,7 +51,7 @@ impl<T: Target> Registers<T> {
         }
     }
 
-    fn get_output_reg(&mut self, idx: InstIdx) -> Register {
+    pub fn get_output_reg(&mut self, idx: InstIdx) -> Register {
         let reg = self.get_reg(idx);
         self.free_reg(reg);
         if let Allocation {
@@ -146,7 +68,7 @@ impl<T: Target> Registers<T> {
         reg
     }
 
-    fn get_reg(&mut self, idx: InstIdx) -> Register {
+    pub fn get_reg(&mut self, idx: InstIdx) -> Register {
         // If this value already has a register allocated, return that.
         if let Some(reg) = self.allocs[idx.idx()].reg {
             debug_assert_eq!(Some(idx), self.live[reg.idx()]);
@@ -197,6 +119,26 @@ impl<T: Target> Registers<T> {
     fn free_reg(&mut self, reg: Register) {
         self.recent.mark_unused(reg);
         self.live[reg.idx()] = None;
+    }
+
+    // A load instruction is special. We never store its value, because it's
+    // already in memory. And if it doesn't have a register assigned to it at
+    // this point, that means no instruction needs the load to happen here, so
+    // we can skip it. That could happen either if the result of the load is
+    // never used (unlikely) or if, sometime between allocating an instruction
+    // that uses this value and now, another instruction needed a register and
+    // stole the one we'd have used. But in that case, the load is emitted at
+    // that time, so we have nothing to do now.
+    pub fn emit_load(&mut self, idx: InstIdx, vars: VarSet, loc: Location) {
+        if let Some(reg) = self.allocs[idx.idx()].reg {
+            let mem = vars.into();
+            self.target.emit_load(reg, mem, loc);
+            self.free_reg(reg);
+        }
+    }
+
+    pub fn finish(self) -> (T, Location) {
+        (self.target, self.stack_slots)
     }
 }
 

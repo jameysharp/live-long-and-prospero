@@ -1,6 +1,6 @@
 use std::num::{NonZero, TryFromIntError};
 
-use crate::ir::{BinOp, Const, Location, UnOp, Var, VarSet};
+use crate::ir::VarSet;
 
 pub mod regalloc;
 pub mod x86;
@@ -39,36 +39,4 @@ impl From<VarSet> for MemorySpace {
     fn from(value: VarSet) -> Self {
         Self(NonZero::new(u8::try_from(value.idx() + 2).unwrap()).unwrap())
     }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum AsmInst {
-    Const {
-        reg: Register,
-        value: Const,
-    },
-    Var {
-        reg: Register,
-        var: Var,
-    },
-    UnOp {
-        reg: Register,
-        op: UnOp,
-        arg: Register,
-    },
-    BinOp {
-        reg: Register,
-        op: BinOp,
-        args: [Register; 2],
-    },
-    Load {
-        reg: Register,
-        mem: MemorySpace,
-        loc: Location,
-    },
-    Store {
-        reg: Register,
-        mem: MemorySpace,
-        loc: Location,
-    },
 }
