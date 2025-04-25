@@ -3,7 +3,7 @@ use std::io;
 
 use crate::codegen::regalloc::{Allocation, Registers};
 use crate::ir::memoize::MemoizedFunc;
-use crate::ir::{BinOp, Const, Inst, Location, UnOp, Var, VarSet};
+use crate::ir::{BinOp, Inst, Location, UnOp, VarSet};
 
 use super::regalloc::Target;
 use super::{MemorySpace, Register};
@@ -40,13 +40,8 @@ pub fn write(
     for (idx, inst) in func.insts.iter().enumerate().rev() {
         let idx = idx.try_into().unwrap();
         match *inst {
-            Inst::Const { value } => {
-                let reg = regs.get_output_reg(idx);
-                regs.target.push(AsmInst::Const { reg, value });
-            }
-            Inst::Var { var } => {
-                let reg = regs.get_output_reg(idx);
-                regs.target.push(AsmInst::Var { reg, var });
+            Inst::Const { .. } | Inst::Var { .. } => {
+                unimplemented!("{inst:?} not allowed in memoized functions")
             }
             Inst::UnOp { op, arg } => {
                 let reg = regs.get_output_reg(idx);
@@ -82,8 +77,6 @@ pub fn write(
 
     for inst in insts.into_iter().rev() {
         match inst {
-            AsmInst::Const { .. } => todo!(),
-            AsmInst::Var { .. } => todo!(),
             AsmInst::UnOp { reg, op, arg } => match op {
                 UnOp::Neg => writeln!(f, "vsubps {},{},{}", Xmm(arg), zero_reg, Xmm(reg))?,
                 UnOp::Square => writeln!(f, "vmulps {},{},{}", Xmm(arg), Xmm(arg), Xmm(reg))?,
@@ -137,14 +130,6 @@ pub fn write(
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AsmInst {
-    Const {
-        reg: Register,
-        value: Const,
-    },
-    Var {
-        reg: Register,
-        var: Var,
-    },
     UnOp {
         reg: Register,
         op: UnOp,
