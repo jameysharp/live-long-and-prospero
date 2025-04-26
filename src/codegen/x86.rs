@@ -17,9 +17,12 @@ pub fn write(mut out: impl io::Write, memoized: &Memoized) -> io::Result<()> {
     )?;
     writeln!(out, ".section .rodata")?;
     writeln!(out, "consts:")?;
-    writeln!(out, ".align 4")?;
+    writeln!(out, ".p2align 4")?;
     for (idx, value) in memoized.consts.iter().enumerate() {
-        writeln!(out, ".L{idx}: .long {:#08x}", value.bits())?;
+        write!(out, ".L{idx}:")?;
+        for _ in 0..STRIDE {
+            writeln!(out, " .long {:#08x}", value.bits())?;
+        }
     }
     writeln!(out, ".globl stride")?;
     writeln!(out, "stride: .short {}", STRIDE)?;
@@ -150,7 +153,7 @@ struct X86Target {
 impl X86Target {
     fn new(vectors: impl IntoIterator<Item = VarSet>) -> X86Target {
         let vectors = vectors.into_iter().fold(0, |set, vars| {
-            set | (1 << MemorySpace::from(vars).idx()) | 1
+            set | (1 << MemorySpace::from(vars).idx()) | 0b11
         });
         X86Target {
             vectors,
@@ -167,14 +170,8 @@ impl Target for X86Target {
         } else {
             XmmUnaryRmRVexOpcode::Vbroadcastss
         };
-        let stride = if mem == VarSet::default().into() {
-            // constants are always scalars
-            1
-        } else {
-            self.stride
-        };
         let dst = reg.into();
-        let src = Address(mem, loc, stride).into();
+        let src = Address(mem, loc, self.stride).into();
         self.insts.push(X86Inst::XmmUnaryRmRVex { op, src, dst });
     }
 
