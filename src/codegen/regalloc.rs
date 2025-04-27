@@ -79,41 +79,45 @@ impl<T: Target> Registers<T> {
         // Otherwise, pick a register and hope nobody needs it too soon.
         let reg = Register::try_from(self.recent.pop()).unwrap();
 
-        // Remember that this register now holds this value, and check what it
-        // held before.
-        self.allocs[idx.idx()].reg = Some(reg);
-        let live = self.live[reg.idx()].replace(idx);
-
-        // Was the selected register already holding another value?
-        if let Some(live) = live {
-            let alloc = &mut self.allocs[live.idx()];
-            debug_assert_eq!(Some(reg), alloc.reg);
-
-            // Make sure that value gets spilled, when we get to its definition,
-            // by ensuring it has a memory location allocated.
-            let (mem, loc) = if let Some(mem) = alloc.mem {
-                (mem, alloc.loc)
-            } else if let Some(slot) = self.free_slots.pop() {
-                slot
-            } else {
-                let new_slot = self.stack_slots;
-                self.stack_slots += 1;
-                (MemorySpace::STACK, new_slot)
-            };
-
+        if let Some((mem, loc)) = self.clobber(idx, reg) {
             // Some later instruction wants this value in this register, so load
             // it for them.
             self.target.emit_load(reg, mem, loc);
-
-            // Remember that this value is only in memory now.
-            *alloc = Allocation {
-                reg: None,
-                mem: Some(mem),
-                loc,
-            };
         }
 
         reg
+    }
+
+    fn clobber(&mut self, idx: InstIdx, reg: Register) -> Option<(MemorySpace, u16)> {
+        // Remember that this register now holds this value, and check what it
+        // held before.
+        self.allocs[idx.idx()].reg = Some(reg);
+
+        // Was the selected register already holding another value?
+        let live = self.live[reg.idx()].replace(idx)?;
+
+        let alloc = &mut self.allocs[live.idx()];
+        debug_assert_eq!(Some(reg), alloc.reg);
+
+        // Make sure that value gets spilled, when we get to its definition,
+        // by ensuring it has a memory location allocated.
+        let (mem, loc) = if let Some(mem) = alloc.mem {
+            (mem, alloc.loc)
+        } else if let Some(slot) = self.free_slots.pop() {
+            slot
+        } else {
+            let new_slot = self.stack_slots;
+            self.stack_slots += 1;
+            (MemorySpace::STACK, new_slot)
+        };
+
+        // Remember that this value is only in memory now.
+        *alloc = Allocation {
+            reg: None,
+            mem: Some(mem),
+            loc,
+        };
+        Some((mem, loc))
     }
 
     fn free_reg(&mut self, reg: Register) {
@@ -136,6 +140,24 @@ impl<T: Target> Registers<T> {
         }
     }
 
+    pub fn address_of(&self, idx: InstIdx) -> Option<(MemorySpace, Location)> {
+        let Allocation { mem, loc, .. } = self.allocs[idx.idx()];
+        Some((mem?, loc))
+    }
+
+    pub fn sink_load(&self, idx: InstIdx) -> bool {
+        if let Allocation {
+            reg: None,
+            mem: Some(_),
+            ..
+        } = self.allocs[idx.idx()]
+        {
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn finish(self) -> (T, Location) {
         (self.target, self.stack_slots)
     }
@@ -153,14 +175,15 @@ struct LruNode {
 
 impl Lru {
     pub fn new(len: usize) -> Self {
-        let data = (0..len)
-            .map(|i| LruNode {
-                prev: ((i + len - 1) % len).try_into().unwrap(),
-                next: ((i + 1) % len).try_into().unwrap(),
-            })
-            .collect();
-        let head = 0.try_into().unwrap();
-        Self { head, data }
+        Self {
+            data: (0..len)
+                .map(|i| LruNode {
+                    prev: ((i + len - 1) % len).try_into().unwrap(),
+                    next: ((i + 1) % len).try_into().unwrap(),
+                })
+                .collect(),
+            head: 0.try_into().unwrap(),
+        }
     }
 
     /// Mark the given node as newest

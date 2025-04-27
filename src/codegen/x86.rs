@@ -3,7 +3,7 @@ use std::io;
 
 use crate::codegen::regalloc::{Allocation, Registers};
 use crate::ir::memoize::{Memoized, MemoizedFunc};
-use crate::ir::{BinOp, Inst, Location, UnOp, Var, VarSet};
+use crate::ir::{BinOp, Inst, InstIdx, Location, UnOp, Var, VarSet};
 
 use super::regalloc::Target;
 use super::{MemorySpace, Register};
@@ -99,13 +99,14 @@ fn emit(
                 };
                 regs.target.insts.push(inst);
             }
-            Inst::BinOp { op, args } => {
+            Inst::BinOp { op, args: [a, b] } => {
                 let dst = regs.get_output_reg(idx).into();
-                let [src1, src2] = args.map(|arg| regs.get_reg(arg).into());
+                let src1 = regs.get_reg(a).into();
+                let src2 = sink_load(&mut regs, b);
                 regs.target.insts.push(X86Inst::XmmRmR {
                     op,
                     src1,
-                    src2: src2.into(),
+                    src2,
                     dst,
                 });
             }
@@ -115,6 +116,17 @@ fn emit(
 
     let (target, stack_slots) = regs.finish();
     (zero_reg, target, stack_slots)
+}
+
+fn sink_load(regs: &mut Registers<X86Target>, arg: InstIdx) -> XmmMem {
+    if let Some((mem, loc)) = regs.address_of(arg) {
+        if regs.target.vectors & (1 << mem.idx()) != 0 {
+            if regs.sink_load(arg) {
+                return Address(mem, loc, regs.target.stride).into();
+            }
+        }
+    }
+    Xmm(regs.get_reg(arg)).into()
 }
 
 fn write_func(
