@@ -100,9 +100,11 @@ fn emit(
                 regs.target.insts.push(inst);
             }
             Inst::BinOp { op, args: [a, b] } => {
+                // can't call get_reg between sink_load and get_output_reg so we
+                // need to allocate operands in this order
                 let dst = regs.get_output_reg(idx).into();
-                let src1 = regs.get_reg(a).into();
                 let src2 = sink_load(&mut regs, b);
+                let src1 = regs.get_reg(a).into();
                 regs.target.insts.push(X86Inst::XmmRmR {
                     op,
                     src1,
@@ -121,7 +123,7 @@ fn emit(
 fn sink_load(regs: &mut Registers<X86Target>, arg: InstIdx) -> XmmMem {
     if let Some((mem, loc)) = regs.address_of(arg) {
         if regs.target.vectors & (1 << mem.idx()) != 0 {
-            if regs.sink_load(arg) {
+            if regs.sink_load(arg, regs.target.insts.len()) {
                 return Address(mem, loc, regs.target.stride).into();
             }
         }
@@ -196,6 +198,14 @@ impl Target for X86Target {
         let src = reg.into();
         let dst = Address(mem, loc, self.stride).into();
         self.insts.push(X86Inst::XmmMovRMVex { op, src, dst });
+    }
+
+    fn patch_sunk_load(&mut self, patch_at: usize, reg: Register) {
+        match &mut self.insts[patch_at] {
+            X86Inst::XmmRmR { src2, .. } => *src2 = Xmm(reg).into(),
+            X86Inst::XmmUnaryRmRVex { src, .. } => *src = Xmm(reg).into(),
+            X86Inst::XmmMovRMVex { .. } => unreachable!(),
+        }
     }
 }
 

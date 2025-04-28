@@ -12,9 +12,17 @@ use super::{MemorySpace, Register};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Allocation {
-    reg: Option<Register>,
+    reg: RegisterState,
     mem: Option<MemorySpace>,
     loc: Location,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum RegisterState {
+    #[default]
+    Unallocated,
+    Reg(Register),
+    SunkLoad(DirtyPoolIndex),
 }
 
 impl Allocation {
@@ -28,12 +36,14 @@ impl Allocation {
 pub trait Target {
     fn emit_load(&mut self, reg: Register, mem: MemorySpace, loc: Location);
     fn emit_store(&mut self, reg: Register, mem: MemorySpace, loc: Location);
+    fn patch_sunk_load(&mut self, patch_at: usize, reg: Register);
 }
 
 pub struct Registers<T> {
     allocs: Vec<Allocation>,
     recent: Lru,
     live: Vec<Option<InstIdx>>,
+    dirty_pool: DirtyPool,
     stack_slots: Location,
     free_slots: Vec<(MemorySpace, Location)>,
     pub target: T,
@@ -45,6 +55,7 @@ impl<T: Target> Registers<T> {
             allocs,
             recent: Lru::new(regs),
             live: vec![None; regs],
+            dirty_pool: DirtyPool::new(regs),
             stack_slots: 0,
             free_slots: Vec::new(),
             target,
@@ -70,9 +81,10 @@ impl<T: Target> Registers<T> {
 
     pub fn get_reg(&mut self, idx: InstIdx) -> Register {
         // If this value already has a register allocated, return that.
-        if let Some(reg) = self.allocs[idx.idx()].reg {
+        if let Some(reg) = self.float_load(idx) {
             debug_assert_eq!(Some(idx), self.live[reg.idx()]);
             self.recent.mark_used(reg);
+            self.dirty_pool.mark_dirty(reg);
             return reg;
         }
 
@@ -91,13 +103,14 @@ impl<T: Target> Registers<T> {
     fn clobber(&mut self, idx: InstIdx, reg: Register) -> Option<(MemorySpace, u16)> {
         // Remember that this register now holds this value, and check what it
         // held before.
-        self.allocs[idx.idx()].reg = Some(reg);
+        self.allocs[idx.idx()].reg = RegisterState::Reg(reg);
+        self.dirty_pool.mark_dirty(reg);
 
         // Was the selected register already holding another value?
         let live = self.live[reg.idx()].replace(idx)?;
 
         let alloc = &mut self.allocs[live.idx()];
-        debug_assert_eq!(Some(reg), alloc.reg);
+        debug_assert_eq!(RegisterState::Reg(reg), alloc.reg);
 
         // Make sure that value gets spilled, when we get to its definition,
         // by ensuring it has a memory location allocated.
@@ -113,7 +126,7 @@ impl<T: Target> Registers<T> {
 
         // Remember that this value is only in memory now.
         *alloc = Allocation {
-            reg: None,
+            reg: RegisterState::Unallocated,
             mem: Some(mem),
             loc,
         };
@@ -134,7 +147,7 @@ impl<T: Target> Registers<T> {
     // stole the one we'd have used. But in that case, the load is emitted at
     // that time, so we have nothing to do now.
     pub fn emit_load(&mut self, idx: InstIdx, mem: MemorySpace, loc: Location) {
-        if let Some(reg) = self.allocs[idx.idx()].reg {
+        if let RegisterState::Reg(reg) = self.allocs[idx.idx()].reg {
             self.target.emit_load(reg, mem, loc);
             self.free_reg(reg);
         }
@@ -145,21 +158,111 @@ impl<T: Target> Registers<T> {
         Some((mem?, loc))
     }
 
-    pub fn sink_load(&self, idx: InstIdx) -> bool {
-        if let Allocation {
-            reg: None,
-            mem: Some(_),
-            ..
-        } = self.allocs[idx.idx()]
-        {
+    pub fn sink_load(&mut self, idx: InstIdx, patch_at: usize) -> bool {
+        if self.float_load(idx).is_none() {
+            let pool_idx = self.dirty_pool.push_load(idx, patch_at);
+            self.allocs[idx.idx()].reg = RegisterState::SunkLoad(pool_idx);
             true
         } else {
             false
         }
     }
 
+    fn float_load(&mut self, idx: InstIdx) -> Option<Register> {
+        let reg = &mut self.allocs[idx.idx()].reg;
+        match *reg {
+            RegisterState::Unallocated => None,
+            RegisterState::Reg(register) => Some(register),
+            RegisterState::SunkLoad(pool_idx) => {
+                let (clean_regs, patch_at) = self.dirty_pool.get_clean_regs(pool_idx, idx);
+
+                // I think it should be possible to clobber registers even if
+                // we currently think they have a value in them, so long as that
+                // register was neither read nor written between the two loads
+                // we're trying to combine. But I can't get it to work yet, so
+                // just don't float loads in that case.
+                let mut clean_regs = clean_regs;
+                for (reg, live) in self.live.iter().enumerate() {
+                    if live.is_some() {
+                        clean_regs &= !(1 << reg);
+                    }
+                }
+
+                if clean_regs == 0 {
+                    *reg = RegisterState::Unallocated;
+                    None
+                } else {
+                    let clean_reg = self.recent.pop_first_in(clean_regs);
+                    let other = self.clobber(idx, clean_reg);
+                    debug_assert!(other.is_none());
+                    self.target.patch_sunk_load(patch_at, clean_reg);
+                    Some(clean_reg)
+                }
+            }
+        }
+    }
+
     pub fn finish(self) -> (T, Location) {
         (self.target, self.stack_slots)
+    }
+}
+
+// Most of the time we can only find a register to float a load pretty soon
+// after the load; on the Prospero challenge with 15 registers, usually there
+// are only registers that are clean and not live within a couple of loads,
+// and the longest was 27 loads later. So allowing up to 32 loads in the queue
+// is generous.
+struct DirtyPool {
+    loads: [InstIdx; 32],
+    patch_at: [usize; 32],
+    front: usize,
+    dirty_before: Vec<usize>,
+}
+
+type DirtyPoolIndex = u8;
+
+impl DirtyPool {
+    fn new(regs: usize) -> Self {
+        Self {
+            loads: [0.try_into().unwrap(); 32],
+            patch_at: [0; 32],
+            front: 0,
+            dirty_before: vec![0; regs],
+        }
+    }
+
+    fn push_load(&mut self, load: InstIdx, patch_at: usize) -> DirtyPoolIndex {
+        let idx = self.front % self.loads.len();
+        self.front += 1;
+        self.loads[idx] = load;
+        self.patch_at[idx] = patch_at;
+        idx.try_into().unwrap()
+    }
+
+    fn mark_dirty(&mut self, i: Register) {
+        self.dirty_before[i.idx()] = self.front;
+    }
+
+    fn get_clean_regs(&self, idx: DirtyPoolIndex, load: InstIdx) -> (u32, usize) {
+        let mut idx = usize::from(idx);
+        if self.loads[idx] != load {
+            return (0, 0);
+        }
+        let patch_at = self.patch_at[idx];
+
+        assert!(self.loads.len().is_power_of_two());
+        idx |= self.front & !(self.loads.len() - 1);
+        if idx >= self.front {
+            idx -= self.loads.len();
+        }
+
+        let mut result = 0;
+        for (reg, &dirty_before) in self.dirty_before.iter().enumerate() {
+            if idx >= dirty_before {
+                result |= 1 << reg;
+            }
+        }
+        (result, patch_at)
     }
 }
 
@@ -216,6 +319,20 @@ impl Lru {
         let out = self.data[self.head.idx()].prev;
         self.head = out; // rotate so that oldest becomes newest
         out
+    }
+
+    pub fn pop_first_in(&mut self, free_regs: u32) -> Register {
+        let mut i = self.head;
+        loop {
+            i = self.data[i.idx()].prev;
+            if free_regs & (1 << i.idx()) != 0 {
+                self.mark_used(i);
+                return i;
+            }
+            if i == self.head {
+                unreachable!();
+            }
+        }
     }
 }
 
