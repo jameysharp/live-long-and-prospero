@@ -24,8 +24,16 @@ pub fn write(mut out: impl io::Write, memoized: &Memoized) -> io::Result<()> {
             writeln!(out, " .long {:#08x}", value.bits())?;
         }
     }
+
+    // constant with only the sign bit of an f32 set, used in `neg`
+    let neg_const = memoized.consts.len().try_into().unwrap();
+    for _ in 0..STRIDE {
+        writeln!(out, ".long {:#08x}", 1 << 31)?;
+    }
+
     writeln!(out, ".globl stride")?;
     writeln!(out, "stride: .short {}", STRIDE)?;
+
     Ok(for func in memoized.funcs.iter() {
         if !func.insts.is_empty() {
             writeln!(out)?;
@@ -39,15 +47,16 @@ pub fn write(mut out: impl io::Write, memoized: &Memoized) -> io::Result<()> {
             writeln!(out, ".p2align 4")?;
             writeln!(out, ".globl {:?}", func.vars)?;
             writeln!(out, "{:?}:", func.vars)?;
-            write_func(&mut out, func, [func.vars, Var::X.into()])?;
+            write_func(&mut out, neg_const, func, [func.vars, Var::X.into()])?;
         }
     })
 }
 
 fn emit(
+    neg_const: Location,
     func: &MemoizedFunc,
     vectors: impl IntoIterator<Item = VarSet>,
-) -> (Xmm, X86Target, Location) {
+) -> (X86Target, Location) {
     let mut allocs: Vec<Allocation> = func
         .insts
         .iter()
@@ -66,8 +75,14 @@ fn emit(
         }
     }
 
-    let zero_reg = Xmm(15.try_into().unwrap());
-    let mut regs = Registers::new(allocs, 15, X86Target::new(vectors));
+    let neg_alloc = allocs.len().try_into().unwrap();
+    allocs.push({
+        let mut alloc = Allocation::default();
+        alloc.initial_location(VarSet::default().into(), neg_const);
+        alloc
+    });
+
+    let mut regs = Registers::new(allocs, 16, X86Target::new(vectors));
 
     for (idx, inst) in func.insts.iter().enumerate().rev() {
         let idx = idx.try_into().unwrap();
@@ -77,25 +92,34 @@ fn emit(
             }
             Inst::UnOp { op, arg } => {
                 let dst = regs.get_output_reg(idx).into();
-                let arg: Xmm = regs.get_reg(arg).into();
                 let inst = match op {
-                    UnOp::Neg => X86Inst::XmmRmR {
-                        op: BinOp::Sub,
-                        src1: zero_reg,
-                        src2: arg.into(),
-                        dst,
-                    },
-                    UnOp::Square => X86Inst::XmmRmR {
-                        op: BinOp::Mul,
-                        src1: arg,
-                        src2: arg.into(),
-                        dst,
-                    },
-                    UnOp::Sqrt => X86Inst::XmmUnaryRmRVex {
-                        op: XmmUnaryRmRVexOpcode::Vsqrtps,
-                        src: arg.into(),
-                        dst,
-                    },
+                    UnOp::Neg => {
+                        let sign = sink_load(&mut regs, neg_alloc);
+                        let arg = regs.get_reg(arg).into();
+                        X86Inst::XmmRmR {
+                            op: XmmRmROpcode::Vxorps,
+                            src1: arg,
+                            src2: sign,
+                            dst,
+                        }
+                    }
+                    UnOp::Square => {
+                        let arg: Xmm = regs.get_reg(arg).into();
+                        X86Inst::XmmRmR {
+                            op: XmmRmROpcode::Vmulps,
+                            src1: arg,
+                            src2: arg.into(),
+                            dst,
+                        }
+                    }
+                    UnOp::Sqrt => {
+                        let arg: Xmm = regs.get_reg(arg).into();
+                        X86Inst::XmmUnaryRmRVex {
+                            op: XmmUnaryRmRVexOpcode::Vsqrtps,
+                            src: arg.into(),
+                            dst,
+                        }
+                    }
                 };
                 regs.target.insts.push(inst);
             }
@@ -106,7 +130,13 @@ fn emit(
                 let src2 = sink_load(&mut regs, b);
                 let src1 = regs.get_reg(a).into();
                 regs.target.insts.push(X86Inst::XmmRmR {
-                    op,
+                    op: match op {
+                        BinOp::Add => XmmRmROpcode::Vaddps,
+                        BinOp::Sub => XmmRmROpcode::Vsubps,
+                        BinOp::Mul => XmmRmROpcode::Vmulps,
+                        BinOp::Min => XmmRmROpcode::Vminps,
+                        BinOp::Max => XmmRmROpcode::Vmaxps,
+                    },
                     src1,
                     src2,
                     dst,
@@ -116,8 +146,8 @@ fn emit(
         }
     }
 
-    let (target, stack_slots) = regs.finish();
-    (zero_reg, target, stack_slots)
+    regs.emit_load(neg_alloc, VarSet::default().into(), neg_const);
+    regs.finish()
 }
 
 fn sink_load(regs: &mut Registers<X86Target>, arg: InstIdx) -> XmmMem {
@@ -133,10 +163,11 @@ fn sink_load(regs: &mut Registers<X86Target>, arg: InstIdx) -> XmmMem {
 
 fn write_func(
     mut f: impl io::Write,
+    neg_const: Location,
     func: &MemoizedFunc,
     vectors: impl IntoIterator<Item = VarSet>,
 ) -> io::Result<()> {
-    let (zero_reg, target, stack_slots) = emit(func, vectors);
+    let (target, stack_slots) = emit(neg_const, func, vectors);
 
     // prologue
     let frame_size = usize::from(stack_slots) * usize::from(target.stride) * 4;
@@ -145,7 +176,6 @@ fn write_func(
         writeln!(f, "movq %rsp,%rbp")?;
         writeln!(f, "sub ${:#x},%rsp", frame_size)?;
     }
-    writeln!(f, "xorps {0},{0}", zero_reg)?;
 
     for inst in target.insts.into_iter().rev() {
         writeln!(f, "{inst}")?;
@@ -212,7 +242,7 @@ impl Target for X86Target {
 #[derive(Debug)]
 enum X86Inst {
     XmmRmR {
-        op: BinOp,
+        op: XmmRmROpcode,
         src1: Xmm,
         src2: XmmMem,
         dst: Xmm,
@@ -239,11 +269,12 @@ impl fmt::Display for X86Inst {
                 dst,
             } => {
                 let opcode = match op {
-                    BinOp::Add => "vaddps",
-                    BinOp::Sub => "vsubps",
-                    BinOp::Mul => "vmulps",
-                    BinOp::Min => "vminps",
-                    BinOp::Max => "vmaxps",
+                    XmmRmROpcode::Vaddps => "vaddps",
+                    XmmRmROpcode::Vsubps => "vsubps",
+                    XmmRmROpcode::Vmulps => "vmulps",
+                    XmmRmROpcode::Vminps => "vminps",
+                    XmmRmROpcode::Vmaxps => "vmaxps",
+                    XmmRmROpcode::Vxorps => "vxorps",
                 };
                 write!(f, "{opcode} {src2},{src1},{dst}")
             }
@@ -264,6 +295,16 @@ impl fmt::Display for X86Inst {
             }
         }
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum XmmRmROpcode {
+    Vaddps,
+    Vsubps,
+    Vmulps,
+    Vminps,
+    Vmaxps,
+    Vxorps,
 }
 
 #[derive(Clone, Copy, Debug)]
