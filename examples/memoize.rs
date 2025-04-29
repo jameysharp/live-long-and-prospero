@@ -1,4 +1,4 @@
-use geometry_compiler::ir;
+use live_long_and_prospero::ir;
 
 fn main() -> ir::io::Result<()> {
     let memoized = ir::io::read(std::io::stdin().lock(), ir::memoize::MemoBuilder::new())?;
