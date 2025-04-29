@@ -104,7 +104,7 @@ fn emit(
                         }
                     }
                     UnOp::Square => {
-                        let arg: Xmm = regs.get_reg(arg).into();
+                        let arg = regs.get_reg(arg).into();
                         X86Inst::XmmRmR {
                             op: XmmRmROpcode::Vmulps,
                             src1: arg,
@@ -113,10 +113,10 @@ fn emit(
                         }
                     }
                     UnOp::Sqrt => {
-                        let arg: Xmm = regs.get_reg(arg).into();
+                        let arg = sink_load(&mut regs, arg);
                         X86Inst::XmmUnaryRmRVex {
                             op: XmmUnaryRmRVexOpcode::Vsqrtps,
-                            src: arg.into(),
+                            src: arg,
                             dst,
                         }
                     }
