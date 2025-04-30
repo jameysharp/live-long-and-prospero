@@ -148,6 +148,7 @@ impl<T: Target> Registers<T> {
     // that time, so we have nothing to do now.
     pub fn emit_load(&mut self, idx: InstIdx, mem: MemorySpace, loc: Location) {
         if let RegisterState::Reg(reg) = self.allocs[idx.idx()].reg {
+            self.dirty_pool.mark_dirty(reg);
             self.target.emit_load(reg, mem, loc);
             self.free_reg(reg);
         }
