@@ -35,20 +35,18 @@ pub fn write(mut out: impl io::Write, memoized: &Memoized) -> io::Result<()> {
     writeln!(out, "stride: .short {}", STRIDE)?;
 
     Ok(for func in memoized.funcs.iter() {
-        if !func.insts.is_empty() {
-            writeln!(out)?;
-            writeln!(out, ".section .rodata")?;
-            writeln!(out, ".globl {:?}_size", func.vars)?;
-            writeln!(out, "{:?}_size:", func.vars)?;
-            writeln!(out, ".short {}", func.outputs.len())?;
+        writeln!(out)?;
+        writeln!(out, ".section .rodata")?;
+        writeln!(out, ".globl {:?}_size", func.vars)?;
+        writeln!(out, "{:?}_size:", func.vars)?;
+        writeln!(out, ".short {}", func.outputs.len())?;
 
-            writeln!(out)?;
-            writeln!(out, ".text")?;
-            writeln!(out, ".p2align 4")?;
-            writeln!(out, ".globl {:?}", func.vars)?;
-            writeln!(out, "{:?}:", func.vars)?;
-            write_func(&mut out, neg_const, func, [func.vars, Var::X.into()])?;
-        }
+        writeln!(out)?;
+        writeln!(out, ".text")?;
+        writeln!(out, ".p2align 4")?;
+        writeln!(out, ".globl {:?}", func.vars)?;
+        writeln!(out, "{:?}:", func.vars)?;
+        write_func(&mut out, neg_const, func, [func.vars, Var::X.into()])?;
     })
 }
 

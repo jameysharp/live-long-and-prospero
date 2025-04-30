@@ -7,6 +7,20 @@ pub struct Memoized {
     pub funcs: [MemoizedFunc; VarSet::ALL.idx()],
 }
 
+impl Default for Memoized {
+    fn default() -> Self {
+        let mut funcs: [MemoizedFunc; VarSet::ALL.idx()] = Default::default();
+        for (idx, func) in funcs.iter_mut().enumerate() {
+            func.vars = VarSet((idx + 1) as u8);
+        }
+        for var in VarSet::ALL {
+            funcs[func_for(var.into())].outputs.push(None);
+        }
+        let consts = Vec::new();
+        Memoized { consts, funcs }
+    }
+}
+
 #[derive(Default)]
 pub struct MemoizedFunc {
     pub vars: VarSet,
@@ -28,6 +42,7 @@ impl MemoizedFunc {
     }
 }
 
+#[derive(Default)]
 pub struct MemoBuilder {
     result: Memoized,
     load: [HashMap<MemoIdx, InstIdx>; VarSet::ALL.idx()],
@@ -73,7 +88,7 @@ impl InstSink for MemoBuilder {
     }
 
     fn push_load(&mut self, _vars: VarSet, _loc: Location) -> Self::Idx {
-        todo!()
+        unimplemented!()
     }
 
     fn finish(mut self, last: Self::Idx) -> Self::Output {
@@ -84,22 +99,7 @@ impl InstSink for MemoBuilder {
 
 impl MemoBuilder {
     pub fn new() -> Self {
-        let mut funcs: [MemoizedFunc; VarSet::ALL.idx()] = Default::default();
-        for (idx, func) in funcs.iter_mut().enumerate() {
-            func.vars = VarSet((idx + 1) as u8);
-        }
-        for var in VarSet::ALL {
-            funcs[func_for(var.into())].outputs.push(None);
-        }
-
-        Self {
-            result: Memoized {
-                consts: Vec::new(),
-                funcs,
-            },
-            load: Default::default(),
-            store: Default::default(),
-        }
+        Self::default()
     }
 
     fn ensure_load(&mut self, vars: VarSet, arg: MemoIdx) -> InstIdx {
@@ -140,5 +140,59 @@ fn func_for(vars: VarSet) -> usize {
         func_idx
     } else {
         todo!("constant folding");
+    }
+}
+
+#[derive(Default)]
+pub struct UnmemoBuilder {
+    insts: Vec<Inst>,
+    consts: Vec<Const>,
+    vars: VarSet,
+}
+
+impl InstSink for UnmemoBuilder {
+    type Idx = InstIdx;
+    type Output = Memoized;
+
+    fn push_const(&mut self, value: Const) -> Self::Idx {
+        let loc = self.consts.len().try_into().unwrap();
+        self.consts.push(value);
+        let vars = VarSet::default();
+        self.push(Inst::Load { vars, loc })
+    }
+
+    fn push_var(&mut self, var: Var) -> Self::Idx {
+        let vars = var.into();
+        self.vars = self.vars | vars;
+        self.push(Inst::Load { vars, loc: 0 })
+    }
+
+    fn push_unop(&mut self, op: UnOp, arg: Self::Idx) -> Self::Idx {
+        self.push(Inst::UnOp { op, arg })
+    }
+
+    fn push_binop(&mut self, op: BinOp, args: [Self::Idx; 2]) -> Self::Idx {
+        self.push(Inst::BinOp { op, args })
+    }
+
+    fn push_load(&mut self, _vars: VarSet, _loc: Location) -> Self::Idx {
+        unimplemented!()
+    }
+
+    fn finish(self, last: Self::Idx) -> Self::Output {
+        let mut memoized = Memoized::default();
+        memoized.consts = self.consts;
+        let func = func_for(self.vars);
+        memoized.funcs[func].insts = self.insts;
+        memoized.funcs[func].add_output(last);
+        memoized
+    }
+}
+
+impl UnmemoBuilder {
+    fn push(&mut self, inst: Inst) -> InstIdx {
+        let idx = self.insts.len().try_into().unwrap();
+        self.insts.push(inst);
+        idx
     }
 }
