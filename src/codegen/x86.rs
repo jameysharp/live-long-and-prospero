@@ -152,6 +152,7 @@ fn sink_load(regs: &mut Registers<X86Target>, arg: InstIdx) -> XmmMem {
     if let Some((mem, loc)) = regs.address_of(arg) {
         if regs.target.vectors & (1 << mem.idx()) != 0 {
             if regs.sink_load(arg, regs.target.insts.len()) {
+                regs.target.insts.push(X86Inst::Placeholder);
                 return Address(mem, loc, regs.target.stride).into();
             }
         }
@@ -176,7 +177,9 @@ fn write_func(
     }
 
     for inst in target.insts.into_iter().rev() {
-        writeln!(f, "{inst}")?;
+        if !matches!(inst, X86Inst::Placeholder) {
+            writeln!(f, "{inst}")?;
+        }
     }
 
     if frame_size > 0 {
@@ -228,17 +231,28 @@ impl Target for X86Target {
         self.insts.push(X86Inst::XmmMovRMVex { op, src, dst });
     }
 
-    fn patch_sunk_load(&mut self, patch_at: usize, reg: Register) {
-        match &mut self.insts[patch_at] {
+    fn patch_sunk_load(
+        &mut self,
+        patch_at: usize,
+        reg: Register,
+        other: Option<(MemorySpace, Location)>,
+    ) {
+        if let Some((mem, loc)) = other {
+            debug_assert!(matches!(self.insts[patch_at], X86Inst::Placeholder));
+            self.emit_load(reg, mem, loc);
+            self.insts.swap_remove(patch_at);
+        }
+        match &mut self.insts[patch_at + 1] {
             X86Inst::XmmRmR { src2, .. } => *src2 = Xmm(reg).into(),
             X86Inst::XmmUnaryRmRVex { src, .. } => *src = Xmm(reg).into(),
-            X86Inst::XmmMovRMVex { .. } => unreachable!(),
+            X86Inst::Placeholder | X86Inst::XmmMovRMVex { .. } => unreachable!(),
         }
     }
 }
 
 #[derive(Debug)]
 enum X86Inst {
+    Placeholder,
     XmmRmR {
         op: XmmRmROpcode,
         src1: Xmm,
@@ -260,6 +274,7 @@ enum X86Inst {
 impl fmt::Display for X86Inst {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
+            X86Inst::Placeholder => Ok(()),
             X86Inst::XmmRmR {
                 op,
                 src1,
