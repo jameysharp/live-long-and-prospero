@@ -61,6 +61,8 @@ processes and interrupts off both hyperthreads of one core and ran [hyperfine][]
 on that core to compare the different code-generation options that I've
 implemented.
 
+[hyperfine]: https://github.com/sharkdp/hyperfine
+
 In the first experiment, I used `prospero.vm` as my test input, but first
 applied the `simplify` and `reassociate` transformations to it. I enabled
 vectorized codegen, which in this version uses 128-bit AVX instructions. I
