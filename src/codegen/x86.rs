@@ -1,38 +1,59 @@
+use clap::Args;
 use std::fmt;
 use std::io;
 
-use crate::codegen::regalloc::{Allocation, Registers};
 use crate::ir::memoize::{Memoized, MemoizedFunc};
 use crate::ir::{BinOp, Inst, InstIdx, Location, UnOp, Var, VarSet};
 
-use super::regalloc::Target;
+use super::regalloc::{Allocation, Config, Registers, Target};
 use super::{MemorySpace, Register};
 
 const STRIDE: u8 = 4;
 
-pub fn write(mut out: impl io::Write, memoized: &Memoized) -> io::Result<()> {
+#[derive(Args, Clone, Copy, Debug)]
+pub struct X86Config {
+    /// Process multiple points in parallel using SIMD instructions
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set, value_parser = clap::builder::BoolishValueParser::new())]
+    pub vectorize: bool,
+
+    #[command(flatten)]
+    pub regalloc: Config,
+}
+
+impl Default for X86Config {
+    fn default() -> Self {
+        X86Config {
+            regalloc: Config::default(),
+            vectorize: true,
+        }
+    }
+}
+
+pub fn write(mut out: impl io::Write, config: X86Config, memoized: &Memoized) -> io::Result<()> {
+    let stride = if config.vectorize { STRIDE } else { 1 };
+
     writeln!(
         out,
         "# compile with: gcc -Wall -g -O2 -o <output> examples/x86-harness.c <output>.s"
     )?;
     writeln!(out, ".section .rodata")?;
+    writeln!(out, ".align {}", 4 * stride)?;
     writeln!(out, "consts:")?;
-    writeln!(out, ".p2align 4")?;
     for (idx, value) in memoized.consts.iter().enumerate() {
         write!(out, ".L{idx}:")?;
-        for _ in 0..STRIDE {
+        for _ in 0..stride {
             writeln!(out, " .long {:#08x}", value.bits())?;
         }
     }
 
     // constant with only the sign bit of an f32 set, used in `neg`
     let neg_const = memoized.consts.len().try_into().unwrap();
-    for _ in 0..STRIDE {
+    for _ in 0..stride {
         writeln!(out, ".long {:#08x}", 1 << 31)?;
     }
 
     writeln!(out, ".globl stride")?;
-    writeln!(out, "stride: .short {}", STRIDE)?;
+    writeln!(out, "stride: .short {}", stride)?;
 
     Ok(for func in memoized.funcs.iter() {
         writeln!(out)?;
@@ -46,11 +67,23 @@ pub fn write(mut out: impl io::Write, memoized: &Memoized) -> io::Result<()> {
         writeln!(out, ".p2align 4")?;
         writeln!(out, ".globl {:?}", func.vars)?;
         writeln!(out, "{:?}:", func.vars)?;
-        write_func(&mut out, neg_const, func, [func.vars, Var::X.into()])?;
+        let vectors = if config.vectorize {
+            &[func.vars, Var::X.into()][..]
+        } else {
+            &[]
+        };
+        write_func(
+            &mut out,
+            config.regalloc,
+            neg_const,
+            func,
+            vectors.iter().copied(),
+        )?;
     })
 }
 
 fn emit(
+    config: Config,
     neg_const: Location,
     func: &MemoizedFunc,
     vectors: impl IntoIterator<Item = VarSet>,
@@ -80,7 +113,7 @@ fn emit(
         alloc
     });
 
-    let mut regs = Registers::new(allocs, 16, X86Target::new(vectors));
+    let mut regs = Registers::new(config, allocs, 16, X86Target::new(vectors));
 
     for (idx, inst) in func.insts.iter().enumerate().rev() {
         let idx = idx.try_into().unwrap();
@@ -162,11 +195,12 @@ fn sink_load(regs: &mut Registers<X86Target>, arg: InstIdx) -> XmmMem {
 
 fn write_func(
     mut f: impl io::Write,
+    config: Config,
     neg_const: Location,
     func: &MemoizedFunc,
     vectors: impl IntoIterator<Item = VarSet>,
 ) -> io::Result<()> {
-    let (target, stack_slots) = emit(neg_const, func, vectors);
+    let (target, stack_slots) = emit(config, neg_const, func, vectors);
 
     // prologue
     let frame_size = usize::from(stack_slots) * usize::from(target.stride) * 4;

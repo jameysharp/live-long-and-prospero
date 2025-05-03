@@ -1,3 +1,4 @@
+use clap::{Args, ValueEnum};
 use std::mem::replace;
 
 use crate::ir::{InstIdx, Location};
@@ -9,6 +10,32 @@ use super::{MemorySpace, Register};
 // memory inputs and outputs for the function to be treated the same as stack
 // spill-slots, as well as reducing the number of store instructions and, in my
 // opinion, simplifying the implementation considerably.
+
+#[derive(Args, Clone, Copy, Debug, Default)]
+pub struct Config {
+    /// On some architectures, arithmetic instructions can also load a value from
+    /// memory without needing to place it in a register first. This reduces
+    /// register pressure, at the cost of potentially duplicating loads.
+    #[arg(long, default_value_t = SinkLoads::default(), value_enum)]
+    pub sink_loads: SinkLoads,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum SinkLoads {
+    /// Don't sink loads
+    None,
+    /// Sink loads unless a register is available, even if that register
+    /// requires spilling live values
+    #[default]
+    SpillAny,
+    /// Sink loads unless a register is available, preferring registers which
+    /// don't require spilling live values
+    PreferDead,
+    /// Sink loads unless a register is available without spilling live values
+    RequireDead,
+    /// Sink all loads when possible
+    All,
+}
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Allocation {
@@ -45,6 +72,7 @@ pub trait Target {
 }
 
 pub struct Registers<T> {
+    config: Config,
     allocs: Vec<Allocation>,
     recent: Lru,
     live: Vec<Option<InstIdx>>,
@@ -56,8 +84,9 @@ pub struct Registers<T> {
 }
 
 impl<T: Target> Registers<T> {
-    pub fn new(allocs: Vec<Allocation>, regs: usize, target: T) -> Self {
+    pub fn new(config: Config, allocs: Vec<Allocation>, regs: usize, target: T) -> Self {
         Registers {
+            config,
             allocs,
             recent: Lru::new(regs),
             live: vec![None; regs],
@@ -178,11 +207,16 @@ impl<T: Target> Registers<T> {
     }
 
     pub fn sink_load(&mut self, idx: InstIdx, patch_at: usize) -> bool {
-        if self.float_load(idx).is_none() {
-            let pool_idx = self
-                .dirty_pool
-                .push_load(idx, patch_at, self.free_generation);
-            self.allocs[idx.idx()].reg = RegisterState::SunkLoad(pool_idx);
+        if self.config.sink_loads != SinkLoads::None && self.float_load(idx).is_none() {
+            match self.config.sink_loads {
+                SinkLoads::None | SinkLoads::All => {}
+                SinkLoads::RequireDead | SinkLoads::PreferDead | SinkLoads::SpillAny => {
+                    let pool_idx = self
+                        .dirty_pool
+                        .push_load(idx, patch_at, self.free_generation);
+                    self.allocs[idx.idx()].reg = RegisterState::SunkLoad(pool_idx);
+                }
+            }
             true
         } else {
             false
@@ -195,8 +229,19 @@ impl<T: Target> Registers<T> {
             RegisterState::Unallocated => None,
             RegisterState::Reg(register) => Some(register),
             RegisterState::SunkLoad(pool_idx) => {
-                let (clean_regs, free_generation, patch_at) =
+                let (mut clean_regs, free_generation, patch_at) =
                     self.dirty_pool.get_clean_regs(pool_idx, idx);
+
+                match self.config.sink_loads {
+                    SinkLoads::PreferDead => {
+                        let dead_regs = clean_regs & dead_regs(&self.live);
+                        if dead_regs != 0 {
+                            clean_regs = dead_regs;
+                        }
+                    }
+                    SinkLoads::RequireDead => clean_regs &= dead_regs(&self.live),
+                    _ => {}
+                }
 
                 if clean_regs == 0 {
                     *reg = RegisterState::Unallocated;
@@ -214,6 +259,16 @@ impl<T: Target> Registers<T> {
     pub fn finish(self) -> (T, Location) {
         (self.target, self.stack_slots)
     }
+}
+
+fn dead_regs(items: &Vec<Option<InstIdx>>) -> u32 {
+    let mut dead_regs = 0;
+    for (reg, live) in items.iter().enumerate() {
+        if live.is_none() {
+            dead_regs |= 1 << reg;
+        }
+    }
+    dead_regs
 }
 
 #[derive(Clone, Copy, Default)]
