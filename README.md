@@ -48,161 +48,6 @@ some ideas that are tricky in a full compiler like Cranelift.
 [Cranelift]: https://cranelift.dev/
 [Wasmtime]: https://wasmtime.dev/
 
-## Results
-
-See the following sections for more detailed explanations of which experiments
-I've tried, but for the impatient, here are my benchmark results.
-
-### Runtime
-
-I've done these tests on an 11th Gen Intel(R) Core(TM) i7-1185G7, which I've
-forced to run at 3.00GHz to avoid frequency scaling effects. I moved other
-processes and interrupts off both hyperthreads of one core and ran [hyperfine][]
-on that core to compare the different code-generation options that I've
-implemented.
-
-[hyperfine]: https://github.com/sharkdp/hyperfine
-
-In the first experiment, I used `prospero.vm` as my test input, but first
-applied the `simplify` and `reassociate` transformations to it. I enabled
-vectorized codegen, which in this version uses 128-bit AVX instructions. I
-compared `--memoize yes` versus `--memoize no`, and for each mode, also tried
-all five `--sink-loads` modes. I tested rendering at 2048x2048 resolution.
-
-```
-  prospero-memo-yes-vector-yes-sink-all 2048 ran
-    1.00 ± 0.00 times faster than prospero-memo-yes-vector-yes-sink-prefer-dead 2048
-    1.00 ± 0.00 times faster than prospero-memo-yes-vector-yes-sink-require-dead 2048
-    1.00 ± 0.00 times faster than prospero-memo-yes-vector-yes-sink-spill-any 2048
-    1.04 ± 0.00 times faster than prospero-memo-yes-vector-yes-sink-none 2048
-    1.23 ± 0.00 times faster than prospero-memo-no-vector-yes-sink-require-dead 2048
-    1.23 ± 0.00 times faster than prospero-memo-no-vector-yes-sink-prefer-dead 2048
-    1.23 ± 0.00 times faster than prospero-memo-no-vector-yes-sink-spill-any 2048
-    1.24 ± 0.00 times faster than prospero-memo-no-vector-yes-sink-all 2048
-    1.31 ± 0.00 times faster than prospero-memo-no-vector-yes-sink-none 2048
-```
-
-We can see that memoization is about 23% faster than without, and also that
-every load-sinking mode I implemented is about equally fast and is slightly
-better than not sinking loads.
-
-In the second experiment, I verified that vectorization has the expected linear
-speedup from processing four times as many points per cycle, regardless of the
-rendered image size. This effect is almost exactly as predicted when memoization
-is enabled.
-
-```
-  prospero-memo-yes-vector-yes-sink-require-dead 1024 ran
-    4.04 ± 0.02 times faster than prospero-memo-yes-vector-no-sink-require-dead 1024
-
-  prospero-memo-yes-vector-yes-sink-require-dead 2048 ran
-    4.04 ± 0.02 times faster than prospero-memo-yes-vector-no-sink-require-dead 2048
-```
-
-But without memoization the vectorization advantage is higher than I'd expect,
-and I don't know why.
-
-```
-  prospero-memo-no-vector-yes-sink-require-dead 1024 ran
-    4.30 ± 0.04 times faster than prospero-memo-no-vector-no-sink-require-dead 1024
-
-  prospero-memo-no-vector-yes-sink-require-dead 2048 ran
-    4.32 ± 0.07 times faster than prospero-memo-no-vector-no-sink-require-dead 2048
-```
-
-For the third experiment, I compared some of the above tests against identical
-code generation configurations but without applying the `simplify` and
-`reassociate` transformation passes first.
-
-These passes provided a 21% improvement when both memoization and load-sinking
-are turned on, and nearly as much (18%) if load-sinking is disabled.
-
-```
-  prospero-memo-yes-vector-yes-sink-all 2048 ran
-    1.21 ± 0.00 times faster than prospero-original-memo-yes-vector-yes-sink-all 2048
-
-  prospero-memo-yes-vector-yes-sink-none 2048 ran
-    1.18 ± 0.00 times faster than prospero-original-memo-yes-vector-yes-sink-none 2048
-```
-
-However, without memoization, they did not have much effect: 8% in conjunction
-with load-sinking, and only 3% without load-sinking.
-
-```
-  prospero-memo-no-vector-yes-sink-all 2048 ran
-    1.08 ± 0.00 times faster than prospero-original-memo-no-vector-yes-sink-all 2048
-
-  prospero-memo-no-vector-yes-sink-none 2048 ran
-    1.03 ± 0.00 times faster than prospero-original-memo-no-vector-yes-sink-none 2048
-```
-
-### Generated code
-
-The output of this compiler contains a constant pool and several functions. In
-all of the above tests, the constant pool has one of three possible sizes:
-
-- 0x13b8 bytes if not vectorized,
-- 0x4dc0 bytes if vectorized, and
-- 0x5870 bytes if vectorized and from the original program without
-  simplification, which among other things unifies multiple copies of the same
-  constant.
-
-The sizes of the text sections of these binaries vary substantially, with
-the largest being 58% bigger than the smallest.
-
-- The memoized versions all have more code than any of the unmemoized versions.
-- Load sinking produces smaller code than not sinking loads, but loading into a
-  register when one is free and otherwise sinking loads is even better in terms
-  of code size.
-- Applying the `simplify` and `reassociate` passes always results in smaller code,
-  all else being equal.
-- Vectorized code is smaller than unvectorized, which surprises me.
-
-```
-00b9c1 prospero-memo-no-vector-yes-sink-prefer-dead
-00b9c1 prospero-memo-no-vector-yes-sink-spill-any
-00bd01 prospero-memo-no-vector-yes-sink-require-dead
-00c601 prospero-memo-no-vector-yes-sink-all
-00cfb1 prospero-original-memo-no-vector-yes-sink-require-dead
-00d291 prospero-memo-no-vector-yes-sink-none
-00d421 prospero-original-memo-no-vector-yes-sink-all
-00d821 prospero-original-memo-no-vector-yes-sink-none
-00d8f1 prospero-memo-no-vector-no-sink-none
-00e801 prospero-memo-yes-vector-yes-sink-prefer-dead
-00e801 prospero-memo-yes-vector-yes-sink-spill-any
-00e831 prospero-memo-yes-vector-yes-sink-require-dead
-00f171 prospero-memo-yes-vector-yes-sink-all
-010a11 prospero-memo-yes-vector-yes-sink-none
-0110a1 prospero-original-memo-yes-vector-yes-sink-require-dead
-011211 prospero-memo-yes-vector-no-sink-none
-011501 prospero-original-memo-yes-vector-yes-sink-all
-012581 prospero-original-memo-yes-vector-yes-sink-none
-```
-
-The original `prospero.vm` has 7,866 instructions, while after the `simplify`
-and `reassociate` passes only 7,714 are left. That's less than a 2% reduction
-and yet a ~20% improvement in runtime when using memoization. Here's the
-reduction in VM instructions, per opcode:
-
-```
-add    1102 957  145
-const  1406 1229 177
-max    2094 2019 75
-min    784  859 -75
-mul    36   33   3
-neg    383  750 -367
-sqrt   270  270  0
-square 362  352  10
-sub    1427 1243 184
-var-x  1    1    0
-var-y  1    1    0
-```
-
-- The reduction in `max` instructions is exactly matched by an increase in `min`
-  instructions due to propagating negations through.
-- There are quite a few more negations after applying these two passes than there
-  were originally.
-
 ## Intermediate representation transformation passes
 
 The `src/ir/` directory contains several transformation passes which output
@@ -568,3 +413,340 @@ this kind of thing; I previously used it in [another exercise][].
 
 [Netpbm]: https://netpbm.sourceforge.net/
 [another exercise]: https://jamey.thesharps.us/2011/11/18/heuristic-search-flood-it/
+
+## Results
+
+I've measured the effects of various strategies within this implementation, on
+runtime, code size, stack frame size, and quantity of loads and stores.
+
+I also verified that all tested variations produce identical output at 2048x2048
+resolution.
+
+### Runtime
+
+I've done these tests on an 11th Gen Intel(R) Core(TM) i7-1185G7, which I've
+forced to run at 3.00GHz to avoid frequency scaling effects. I [moved other
+processes and interrupts off both hyperthreads of one core][cpu-isolation] and
+ran [hyperfine][] on that core to compare the different code-generation options
+that I've implemented.
+
+[hyperfine]: https://github.com/sharkdp/hyperfine
+[cpu-isolation]: https://github.com/bytecodealliance/sightglass/blob/main/docs/cpu-isolation.md
+
+Keep in mind that I'm not using threads in any of these tests. All comparisons
+are for single-core performance only.
+
+#### Memoization and load-sinking
+
+In the first experiment, I used `prospero.vm` as my test input, but first
+applied the `simplify` and `reassociate` transformations to it. I enabled
+vectorized codegen, which in this version uses 128-bit AVX instructions. I
+compared `--memoize yes` versus `--memoize no`, and for each mode, also tried
+all five `--sink-loads` modes. I tested rendering at 2048x2048 resolution.
+
+```
+  prospero-memo-yes-vector-yes-sink-all 2048 ran
+    1.00 ± 0.00 times faster than prospero-memo-yes-vector-yes-sink-prefer-dead 2048
+    1.00 ± 0.00 times faster than prospero-memo-yes-vector-yes-sink-require-dead 2048
+    1.00 ± 0.00 times faster than prospero-memo-yes-vector-yes-sink-spill-any 2048
+    1.04 ± 0.00 times faster than prospero-memo-yes-vector-yes-sink-none 2048
+    1.23 ± 0.00 times faster than prospero-memo-no-vector-yes-sink-require-dead 2048
+    1.23 ± 0.00 times faster than prospero-memo-no-vector-yes-sink-prefer-dead 2048
+    1.23 ± 0.00 times faster than prospero-memo-no-vector-yes-sink-spill-any 2048
+    1.24 ± 0.00 times faster than prospero-memo-no-vector-yes-sink-all 2048
+    1.31 ± 0.00 times faster than prospero-memo-no-vector-yes-sink-none 2048
+```
+
+We can see that memoization is about 23% faster than without, and also that
+every load-sinking mode I implemented is about equally fast and is slightly
+better than not sinking loads.
+
+#### Vectorization
+
+In the second experiment, I verified that vectorization has the expected linear
+speedup from processing four times as many points per cycle, regardless of the
+rendered image size and regardless of whether memoization is enabled.
+
+Note that the load-sinking optimization does not work unless vectorization
+is enabled, because the arithmetic instructions try to load a whole vector
+at a time. So to keep this comparison fair I've only tested with load-sinking
+disabled.
+
+The effect of vectorization is almost exactly as predicted.
+
+```
+  prospero-memo-yes-vector-yes-sink-none 1024 ran
+    3.93 ± 0.04 times faster than prospero-memo-yes-vector-no-sink-none 1024
+
+  prospero-memo-yes-vector-yes-sink-none 2048 ran
+    3.89 ± 0.02 times faster than prospero-memo-yes-vector-no-sink-none 2048
+
+  prospero-memo-no-vector-yes-sink-none 1024 ran
+    4.00 ± 0.06 times faster than prospero-memo-no-vector-no-sink-none 1024
+
+  prospero-memo-no-vector-yes-sink-none 2048 ran
+    4.04 ± 0.02 times faster than prospero-memo-no-vector-no-sink-none 2048
+```
+
+#### Simplification and reassociation
+
+For the third experiment, I compared some of the above tests against identical
+code generation configurations but without applying the `simplify` and
+`reassociate` transformation passes first.
+
+These passes provided a 21% improvement when both memoization and load-sinking
+are turned on, and nearly as much (18%) if load-sinking is disabled.
+
+```
+  prospero-memo-yes-vector-yes-sink-all 2048 ran
+    1.21 ± 0.00 times faster than prospero-original-memo-yes-vector-yes-sink-all 2048
+
+  prospero-memo-yes-vector-yes-sink-none 2048 ran
+    1.18 ± 0.00 times faster than prospero-original-memo-yes-vector-yes-sink-none 2048
+```
+
+However, without memoization, they did not have much effect: 8% in conjunction
+with load-sinking, and only 3% without load-sinking.
+
+```
+  prospero-memo-no-vector-yes-sink-all 2048 ran
+    1.08 ± 0.00 times faster than prospero-original-memo-no-vector-yes-sink-all 2048
+
+  prospero-memo-no-vector-yes-sink-none 2048 ran
+    1.03 ± 0.00 times faster than prospero-original-memo-no-vector-yes-sink-none 2048
+```
+
+#### Scaling with image size
+
+A straightforward implementation that is saturating the computational resources
+it has available to it should take time linear in the number of pixels rendered.
+Since the output images are square, doubling the number of pixels along one
+axis quadruples the number of pixels total. Therefore we can predict that each
+doubling will take roughly four times as long, too. That holds true here for the
+non-memoized version.
+
+```
+  prospero-memo-no-vector-yes-sink-all 256 ran
+    3.93 ± 0.09 times faster than prospero-memo-no-vector-yes-sink-all 512
+   15.45 ± 0.28 times faster than prospero-memo-no-vector-yes-sink-all 1024
+   61.43 ± 1.00 times faster than prospero-memo-no-vector-yes-sink-all 2048
+```
+
+I wasn't sure what to expect for the memoized version, though. Memoized
+instructions only run twice as often when the resolution doubles, while the main
+loop still runs four times as often. But it turns out that the memoized version
+also scales linearly in the number of pixels rendered.
+
+```
+  prospero-memo-yes-vector-yes-sink-all 256 ran
+    3.88 ± 0.11 times faster than prospero-memo-yes-vector-yes-sink-all 512
+   15.32 ± 0.30 times faster than prospero-memo-yes-vector-yes-sink-all 1024
+   61.11 ± 1.04 times faster than prospero-memo-yes-vector-yes-sink-all 2048
+  266.68 ± 4.33 times faster than prospero-memo-yes-vector-yes-sink-all 4096
+ 1095.86 ± 17.46 times faster than prospero-memo-yes-vector-yes-sink-all 8192
+```
+
+I am not sure I have a good explanation for that result.
+
+### Intermediate representation metrics
+
+The original `prospero.vm` has 7,866 instructions, while after the `simplify`
+and `reassociate` passes 7,714 are left. That's less than a 2% reduction and yet
+a ~20% improvement in runtime when using memoization. Here's the effect on the
+number of VM instructions, per opcode:
+
+|        | orig | simp | diff |
+| ------ | ---: | ---: | ---: |
+| add    | 1102 |  957 | -145 |
+| const  | 1406 | 1229 | -177 |
+| max    | 2094 | 2019 |  -75 |
+| min    |  784 |  859 |  +75 |
+| mul    |   36 |   33 |   -3 |
+| neg    |  383 |  750 | +367 |
+| sqrt   |  270 |  270 |    0 |
+| square |  362 |  352 |  -10 |
+| sub    | 1427 | 1243 | -184 |
+| var-x  |    1 |    1 |    0 |
+| var-y  |    1 |    1 |    0 |
+| ------ | ---- | ---- | ---- |
+| total  | 7866 | 7714 | -152 |
+
+The reduction in `max` instructions is exactly matched by an increase in `min`
+instructions; this is due to propagating negations through.
+
+Ignoring constants, these passes actually increased the number of instructions,
+by creating so many more negations than there were originally.
+
+These passes reduce the number of intermediate results that must be stored by
+memoization functions and then loaded by the main-loop. These figures determine
+memory use. Each x output needs to be stored for every column, so for a
+2048x2048 image there are 2048 copies of the set of x outputs. Similarly, each y
+output needs as many copies as the vector size (e.g. 4).
+
+| outputs           | orig | simp | diff  |
+| -------           | ---: | ---: | ----: |
+| const             | 1406 | 1229 |  -177 |
+| x                 | 1025 |  695 |  -330 |
+| x (KiB@2048px)    | 8200 | 5560 | -2640 |
+| y                 |  598 |  545 |   -53 |
+| y (KiB@4x vector) |    9 |    9 |    -1 |
+
+Memoization is a win if enough instructions can be moved from the main-loop
+to either of the x or y memoization functions. Reassociation helps move more
+instructions out of the hot loop, as well as reducing the number of intermediate
+values that need to be in memory.
+
+| instructions | orig | simp | diff |
+| ------------ | ---: | ---: | ---: |
+| xy           | 5903 | 5279 | -624 |
+| x            | 2405 | 2549 | +144 |
+| y            | 1216 | 1204 |  -12 |
+| ------------ | ---- | ---- | ---- |
+| total        | 9524 | 9032 | -492 |
+
+About 60% of the reduction in main-loop instructions is due to not needing to
+load as many intermediate values from the memoization functions.
+
+### x86 code size
+
+The output of this compiler contains a constant pool and several functions. In
+all of the above tests, the constant pool has one of three possible sizes:
+
+- 0x13b8 bytes if not vectorized;
+- 0x4dc0 bytes if vectorized, because there are four copies of every constant to
+  allow them to be loaded as-is to fill a vector register; and
+- 0x5870 bytes if vectorized and from the original program without simplification,
+  since simplification unifies multiple copies of the same constant.
+
+The sizes of the text sections of these binaries vary substantially, with
+the largest being 58% bigger than the smallest.
+
+| text size | simplify | memo | vector | sink loads |
+| ------: | --- | --- | --- | --- |
+|  0xb9c1 | yes | no  | yes | prefer-dead |
+|  0xb9c1 | yes | no  | yes | spill-any |
+|  0xbd01 | yes | no  | yes | require-dead |
+|  0xc601 | yes | no  | yes | all |
+|  0xcfb1 | no  | no  | yes | require-dead |
+|  0xd291 | yes | no  | yes | none |
+|  0xd421 | no  | no  | yes | all |
+|  0xd821 | no  | no  | yes | none |
+|  0xd8f1 | yes | no  | no  | none |
+|  0xe801 | yes | yes | yes | prefer-dead |
+|  0xe801 | yes | yes | yes | spill-any |
+|  0xe831 | yes | yes | yes | require-dead |
+|  0xf171 | yes | yes | yes | all |
+| 0x10a11 | yes | yes | yes | none |
+| 0x110a1 | no  | yes | yes | require-dead |
+| 0x11211 | yes | yes | no  | none |
+| 0x11501 | no  | yes | yes | all |
+| 0x12581 | no  | yes | yes | none |
+
+- The memoized versions all have more code than any of the unmemoized versions,
+  because they need to store intermediate results to memory.
+- Load sinking produces smaller code than not sinking loads, but loading into a
+  register when one is free and otherwise sinking loads is even better in terms
+  of code size.
+- Applying the `simplify` and `reassociate` passes always results in smaller
+  machine code, all else being equal, even though they produce more non-constant
+  VM instructions.
+- Vectorized code is smaller than unvectorized, which surprises me.
+
+### x86 stack frame size
+
+The size of the stack frame for a function is related to the worst-case register
+pressure within that function, and to the register allocator's ability to
+allocate the available registers efficiently. When many intermediate results are
+live at the same time, some need to get spilled to memory.
+
+I chose to let the register allocator use each element of output arrays as
+scratch space until the final value of that element was written there. As a
+result, when memoizing, the single-variable functions had plenty of scratch
+space without allocating a stack frame. However, in every configuration, the
+function which depends on both X and Y always allocated a stack frame.
+
+| frame size | simplify | memo | vector | sink loads |
+| ----: | --- | --- | --- | --- |
+|  0x24 | yes | yes | no  | none |
+|  0x80 | no  | yes | yes | all |
+|  0x80 | no  | yes | yes | none |
+|  0x80 | no  | yes | yes | require-dead |
+|  0x90 | yes | yes | yes | all |
+|  0x90 | yes | yes | yes | none |
+|  0x90 | yes | yes | yes | prefer-dead |
+|  0x90 | yes | yes | yes | require-dead |
+|  0x90 | yes | yes | yes | spill-any |
+| 0x1d8 | yes | no  | no  | none |
+| 0x740 | yes | no  | yes | all |
+| 0x740 | yes | no  | yes | require-dead |
+| 0x750 | yes | no  | yes | prefer-dead |
+| 0x750 | yes | no  | yes | spill-any |
+| 0x750 | no  | no  | yes | all |
+| 0x750 | no  | no  | yes | require-dead |
+| 0x760 | yes | no  | yes | none |
+| 0x770 | no  | no  | yes | none |
+
+All of the memoized versions had significantly smaller stack frames, because
+many of the intermediate results they needed were already in memory, written
+there by the memoized single-variable functions.
+
+Stack frames with vectorization were four times the size of stack frames
+without, due to storing four-element vectors instead of individual scalar
+values.
+
+Other than those variations, all stack frame sizes were very similar across the
+other choices of variables that I studied.
+
+#### Loads and stores
+
+Vectorization has no effect on these measures so I've omitted non-vectorized
+cases from these tables.
+
+Memoization generated more instructions that load from memory than almost all
+cases without memoization, because it forces intermediate results into memory
+that sometimes can stay in a register otherwise.
+
+| loads | simplify | memo | vector | sink loads |
+| ---: | --- | --- | --- | --- |
+| 2421 | yes | no  | yes | prefer-dead |
+| 2421 | yes | no  | yes | spill-any |
+| 2500 | yes | no  | yes | none |
+| 2608 | yes | no  | yes | require-dead |
+| 2628 | no  | no  | yes | none |
+| 3074 | no  | no  | yes | require-dead |
+| 3194 | yes | yes | yes | prefer-dead |
+| 3194 | yes | yes | yes | spill-any |
+| 3235 | yes | yes | yes | none |
+| 3320 | yes | yes | yes | require-dead |
+| 3407 | yes | no  | yes | all |
+| 3642 | no  | no  | yes | all |
+| 3807 | no  | yes | yes | none |
+| 4037 | no  | yes | yes | require-dead |
+| 4094 | yes | yes | yes | all |
+| 4572 | no  | yes | yes | all |
+
+Similarly, memoization generated more instructions that store to memory than any
+non-memoized case.
+
+| stores | simplify | memo | vector | sink loads |
+| ---: | --- | --- | --- | --- |
+| 322  | yes | no  | yes | all |
+| 327  | yes | no  | yes | require-dead |
+| 330  | yes | no  | yes | prefer-dead |
+| 330  | yes | no  | yes | spill-any |
+| 334  | yes | no  | yes | none |
+| 341  | no  | no  | yes | all |
+| 346  | no  | no  | yes | require-dead |
+| 361  | no  | no  | yes | none |
+| 1352 | yes | yes | yes | all |
+| 1359 | yes | yes | yes | require-dead |
+| 1362 | yes | yes | yes | none |
+| 1362 | yes | yes | yes | prefer-dead |
+| 1362 | yes | yes | yes | spill-any |
+| 1648 | no  | yes | yes | all |
+| 1656 | no  | yes | yes | require-dead |
+| 1661 | no  | yes | yes | none |
+
+Note that the choice of load-sinking policy has an effect on not only the number
+of loads but also the number of stores, because it affects how many values are
+spilled.
