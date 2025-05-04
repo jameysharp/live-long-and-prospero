@@ -546,7 +546,77 @@ also scales linearly in the number of pixels rendered.
  1095.86 ± 17.46 times faster than prospero-memo-yes-vector-yes-sink-all 8192
 ```
 
-I am not sure I have a good explanation for that result.
+Asymptotically, runtime is still dominated by the `size^2` term even if we
+make a lot of instructions only run `size` times. So memoization is a nice
+constant-factor improvement but not an improvement in asymptotic complexity.
+
+### Compile time
+
+Part of Matt's challenge is that this rendering work may be happening in
+real-time as an artist edits their model, and so any optimizations and code
+generation should be as fast as possible.
+
+My benchmarking methodology is not well suited to measuring programs running as
+fast as my compiler passes do on this input, which is a quite small input. But
+I've given it a try anyway.
+
+First, since every test program does I/O in text form, let's get a baseline
+for how long it takes to parse and then print `prospero.vm`. All tests in this
+section are done with release builds of the corresponding example programs.
+
+```
+  Time (mean ± σ):       6.4 ms ±   0.2 ms    [User: 4.2 ms, System: 2.2 ms]
+  Range (min … max):     6.1 ms …   7.2 ms    311 runs
+```
+
+It spends a third of its time in the kernel doing all that I/O.
+
+The `simplify` pass takes about 1.3ms of user time on top of the parsing and
+printing:
+
+```
+  Time (mean ± σ):       7.5 ms ±   0.2 ms    [User: 5.5 ms, System: 2.0 ms]
+  Range (min … max):     7.2 ms …   8.5 ms    287 runs
+```
+
+The `reassociate` pass, run on the output of the `simplify` pass, takes less
+than 1ms of user time.
+
+```
+  Time (mean ± σ):       7.2 ms ±   1.4 ms    [User: 5.1 ms, System: 2.1 ms]
+  Range (min … max):     6.7 ms …  14.1 ms    293 runs
+```
+
+Running the `memoize` pass takes about 1.2ms of user time.
+
+```
+  Time (mean ± σ):       8.0 ms ±   0.2 ms    [User: 5.4 ms, System: 2.5 ms]
+  Range (min … max):     7.7 ms …   8.9 ms    268 runs
+```
+
+Generating x86 assembly from the simplified and reassociated input takes
+slightly longer. Without the `memoize` pass it's about 2ms of user time.
+
+```
+  Time (mean ± σ):       8.7 ms ±   0.3 ms    [User: 6.1 ms, System: 2.6 ms]
+  Range (min … max):     8.4 ms …   9.6 ms    248 runs
+```
+
+With the `memoize` pass code generation takes about 3ms of user time, which is
+consistent with the previous results. Different load-sinking policies have little
+effect on this time, and neither does disabling vectorization.
+
+```
+  Time (mean ± σ):       9.8 ms ±   0.3 ms    [User: 7.1 ms, System: 2.6 ms]
+  Range (min … max):     9.4 ms …  10.8 ms    224 runs
+```
+
+In short, we can make a rough estimate that code generation and all passes
+together are somewhere around **5ms**, when we exclude I/O.
+
+While I've tried to be careful about writing code that is not obviously slow,
+I've made no effort to profile or optimize this implementation, so a motivated
+person could probably get this time down further.
 
 ### Intermediate representation metrics
 
@@ -643,7 +713,8 @@ the largest being 58% bigger than the smallest.
 | 0x12581 | no  | yes | yes | none |
 
 - The memoized versions all have more code than any of the unmemoized versions,
-  because they need to store intermediate results to memory.
+  because they need to store intermediate results to memory. Memoization costs
+  about 20-25% more code than the otherwise identical non-memoized version.
 - Load sinking produces smaller code than not sinking loads, but loading into a
   register when one is free and otherwise sinking loads is even better in terms
   of code size.
@@ -750,3 +821,72 @@ non-memoized case.
 Note that the choice of load-sinking policy has an effect on not only the number
 of loads but also the number of stores, because it affects how many values are
 spilled.
+
+## Conclusions
+
+I've answered my original research questions as well as some more I thought of
+later.
+
+- Memoization is a signficant win for runtime on the Prospero Challenge, around
+  20%, although it increases code size by 20-25% and adds a few megabytes of
+  heap allocations when rendering 2048x2048 images.
+
+- This was a great choice of challenge for trying out some different compiler
+  tricks without having to make them work correctly in a general-purpose
+  compiler like Cranelift.
+
+- Load sinking is worth doing given the chance, but for this challenge it's okay
+  to skip any complicated bookkeeping and patching, and just sink every load
+  you can.
+
+- Load sinking does generate a lot of extra loads though, so if you're willing
+  to maintain a more complex implementation, the require-dead policy is still
+  fairly simple, or the spill-any/prefer-dead policies are more complex but
+  allow removing the most loads.
+
+## Future work
+
+Some other experiments that might be interesting from here are:
+
+- Does using 256-bit or 512-bit vector registers exhibit the same linear scaling
+  that 128-bit SIMD does?
+
+- What effect does unrolling the loop by a factor of two or more have, so the
+  vector stride is longer than a single vector register? It should increase
+  register pressure but there might be an advantage to reusing loaded constants
+  and y-values more times.
+
+- Is there an efficient instruction scheduling heuristic that works well on this
+  problem? Minimizing register pressure is really important here, and the order
+  that instructions are issued in can make a huge difference.
+
+- Does runtime get better if code generation can select instructions such as
+  fused multiply-add (FMA) that compute a combination of several VM instructions
+  instead of just one? Notably, there are FMA variants that also include
+  negation.
+
+- What impact would there be in switching from the regular square-root
+  instruction, which computes an accurate result, to the "approximate
+  reciprocal square root" instruction [`rsqrtps`][]? Is the lower precision
+  sufficient, is a Newton-Raphson step useful, and is extra register pressure
+  a worth-while trade-off? (See section 16.17 of [Agner Fog's optimization
+  manuals][agner-manuals], [volume 2][agner-vol2].)
+
+- Given that the Prospero Challenge only consumes the sign bit of the result,
+  we could replace some `min`/`max`/`mul`/`neg` instructions with bitwise
+  `or`/`and`/`xor`/`not`, as other contributors to this challenge have observed.
+  Those sign-bits can be packed into general-purpose registers instead of vector
+  registers, which might ease register pressure. (See also the [`movmskps`][]
+  instruction.) They can also be stored as bit-masks when spilled to the stack
+  or stored to an output buffer, saving memory.
+
+- After identifying instructions where only the sign bit is needed, I think it's
+  possible to transform those instructions into conditional branches, and skip
+  computing entire subtrees of the expression. This is easier on axes which
+  aren't vectorized, but it's also possible to check if all bits in a bit-mask
+  are 0, or if they're all 1, and skip work in those cases. This leads to
+  interesting questions about how to extend the register allocator to handle
+  conditional branching.
+
+[`rsqrtps`]: https://www.felixcloutier.com/x86/rsqrtps
+[`movmskps`]: https://www.felixcloutier.com/x86/movmskps
