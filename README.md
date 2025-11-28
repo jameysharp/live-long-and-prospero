@@ -213,6 +213,15 @@ Prospero Challenge. I now understand what motivated him to do that!
 
 [SSRA]: https://www.mattkeeter.com/blog/2022-10-04-ssra/
 
+(Integrating SSRA in Cranelift was a Google Summer of Code project by Demilade
+Sonuga and mentored by Chris Fallin. See the [blog posts][fastalloc-blog],
+[design docs][fastalloc-docs], and [implementation][fastalloc-impl] for more
+details.)
+
+[fastalloc-blog]: https://d-sonuga.netlify.app/gsoc/
+[fastalloc-docs]: https://github.com/bytecodealliance/regalloc2/blob/main/doc/FASTALLOC.md
+[fastalloc-impl]: https://github.com/bytecodealliance/regalloc2/tree/main/src/fastalloc
+
 An important thing to understand about SSRA is that it works in a single pass
 over all the instructions. When it sees an instruction, it decides immediately
 what registers to assign to its operands and results, and then moves on to the
@@ -874,7 +883,7 @@ Some other experiments that might be interesting from here are:
 
 - Given that the Prospero Challenge only consumes the sign bit of the result,
   we could replace some `min`/`max`/`mul`/`neg` instructions with bitwise
-  `or`/`and`/`xor`/`not`, as other contributors to this challenge have observed.
+  `or`/`and`/`xor`/`not`, [as CF Bolz-Tereick has observed][demanded-bits].
   Those sign-bits can be packed into general-purpose registers instead of vector
   registers, which might ease register pressure. (See also the [`movmskps`][]
   instruction.) They can also be stored as bit-masks when spilled to the stack
@@ -890,3 +899,4 @@ Some other experiments that might be interesting from here are:
 
 [`rsqrtps`]: https://www.felixcloutier.com/x86/rsqrtps
 [`movmskps`]: https://www.felixcloutier.com/x86/movmskps
+[demanded-bits]: https://pypy.org/posts/2025/04/prospero-in-rpython.html
